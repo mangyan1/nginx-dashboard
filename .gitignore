@@ -1,5 +1,7 @@
 node_modules/
 test/fixtures/
-test/probe-*/
+# no trailing slash: `test/probe-*/` only matches a *directory*, so a stray probe-*.sh
+# sitting in test/ would sail straight into `git add -A`
+test/probe-*
 *.log
 .env

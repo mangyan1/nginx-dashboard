@@ -33,6 +33,7 @@ fs.writeFileSync(path.join(FIX, 'nginx', 'logs', 'error.log'), '')
 
 let cookie = ''
 let failed = 0
+let ran = 0
 
 async function req(method, p, body) {
   const opts = { method, headers: { ...(cookie ? { cookie } : {}) } }
@@ -46,7 +47,10 @@ async function req(method, p, body) {
   return { status: res.status, body: await res.json().catch(() => ({})) }
 }
 
+// `ran` is printed at the end so a suite that silently stops executing checks (an early
+// throw, a skip that became a no-op) is visible instead of reading as a pass.
 function check(name, cond, extra = '') {
+  ran++
   if (cond) console.log(`  ok  ${name}`)
   else { failed++; console.log(`FAIL  ${name} ${extra}`) }
 }
@@ -152,5 +156,5 @@ try {
   server.kill()
 }
 
-console.log(failed ? `\n${failed} FAILED` : '\nall checks passed')
+console.log(failed ? `\n${failed} of ${ran} FAILED` : `\nall ${ran} checks passed`)
 process.exit(failed ? 1 : 0)

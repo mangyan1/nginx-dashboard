@@ -1,0 +1,6 @@
+# host node_modules are platform-specific; the image installs its own
+node_modules/
+.git/
+test/fixtures/
+test/probe-*
+*.log

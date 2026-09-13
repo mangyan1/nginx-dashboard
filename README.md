@@ -20,7 +20,12 @@ Runs next to nginx on your Ubuntu/Debian server.
   read-only.
 - Every change goes through one pipeline: write file → `nginx -t` →
   on failure restore the previous file byte-for-byte and show the error →
-  on success `nginx -s reload`. A broken config can never reach nginx.
+  on success `nginx -s reload`. A config nginx rejects can never reach nginx.
+  Two honest caveats: a *disabled* site's `.conf` is not validated (nginx reads
+  only `sites-enabled`), so that error surfaces when you enable it; and
+  `nginx -s reload` exits 0 even when the master then refuses the config at
+  runtime, so a port that is already taken will leave the UI saying "enabled"
+  while nginx serves the previous config. See `AGENT.md` §4.
 - http-level directives (upstreams, rate-limit zones) live in the
   dashboard-owned `/etc/nginx/conf.d/00-dashboard.conf`. `nginx.conf` is
   never touched.

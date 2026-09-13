@@ -19,7 +19,9 @@ const { defaultSite, renderSiteConf, validateSite } = await import('../lib/manif
 
 const realRun = hooks.run
 let failed = 0
+let ran = 0
 const check = (name, cond, extra = '') => {
+  ran++
   if (!cond) failed++
   console.log(`  ${cond ? 'ok  ' : 'FAIL'} ${name}${cond ? '' : `  ${extra}`}`)
 }
@@ -128,8 +130,18 @@ check('injection-shaped domain rejected', validateSite(badDomain).some(e => e.in
 const dangling = { ...defaultSite('x'), domains: ['ok.test'], proxy: [{ path: '/', target: 'upstream:ghost' }] }
 check('dangling upstream reference rejected', validateSite(dangling).some(e => e.includes('unknown upstream')), JSON.stringify(validateSite(dangling)))
 check('a clean site passes validation', validateSite({ ...defaultSite('x'), domains: ['ok.test'], upstreams: mk('x').upstreams, proxy: mk('x').proxy }).length === 0, JSON.stringify(validateSite({ ...defaultSite('x'), domains: ['ok.test'], upstreams: mk('x').upstreams, proxy: mk('x').proxy })))
+const badRoot = { ...defaultSite('x'), domains: ['ok.test'], root: '/var/www/x; }\nserver { root /etc;' }
+check('injection-shaped docroot rejected', validateSite(badRoot).some(e => e.includes('invalid document root')), JSON.stringify(validateSite(badRoot)))
+
+// ---- 8. a proxy rule must not drop the docroot ----
+// Emitting only the proxy locations left the site with no `root`, so every other path fell
+// through to nginx's compiled-in default root and served its stock welcome page.
+const withProxy = renderSiteConf({ ...mk('p'), root: '/var/www/p', proxy: [{ path: '/api', target: 'http://10.0.0.1:8080' }] })
+check('proxy site still emits its docroot', withProxy.includes('root /var/www/p;'), withProxy)
+check('proxy site still emits a proxy location', withProxy.includes('location /api {'), withProxy)
+check('static-cache block survives alongside a proxy rule', withProxy.includes('expires 30d;'), withProxy)
 
 hooks.run = realRun
 fs.rmSync(D, { recursive: true, force: true })
-console.log(failed ? `\n${failed} FAILED` : '\nall checks passed')
+console.log(failed ? `\n${failed} of ${ran} FAILED` : `\nall ${ran} checks passed`)
 process.exit(failed ? 1 : 0)

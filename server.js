@@ -411,7 +411,9 @@ server {
 }
 `
 if (!fs.existsSync(STATUS_CONF)) {
-  apply([STATUS_CONF], () => fs.writeFileSync(STATUS_CONF, STATUS_CONF_TEXT))
+  // awaited so the server is not listening before stub_status is live — otherwise a first
+  // /api/metrics call races the nginx -t + reload this triggers and 503s
+  await apply([STATUS_CONF], () => fs.writeFileSync(STATUS_CONF, STATUS_CONF_TEXT))
 }
 
 app.get('/api/metrics', async (req, res) => {

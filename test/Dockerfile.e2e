@@ -1,0 +1,22 @@
+# Real-nginx end-to-end: node + nginx + openssl + curl in one image, so test/e2e.mjs
+# can drive the live API against a real nginx and check what nginx actually does.
+# Build & run: npm run test:e2e
+FROM node:20-bookworm
+
+# nginx (real reloads, real -t), openssl (certs), curl (traffic as nginx sees it),
+# logrotate (the rotate endpoint). systemd is deliberately absent — start/stop/restart
+# cannot work in a container and stay unverified until this runs on a real server.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends nginx openssl curl logrotate \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm install --omit=dev
+
+# dist/ is committed, so there is no build step here
+COPY . .
+
+# nginx first: the master process must exist or `nginx -s reload` has nothing to signal.
+# It daemonizes, so this returns immediately.
+CMD ["sh", "-c", "nginx && node test/e2e.mjs"]
