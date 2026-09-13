@@ -89,6 +89,12 @@ try {
   check('symlink created', fs.existsSync(path.join(FIX, 'nginx', 'sites-enabled', 'myapp.conf')))
   check('disable site', (await req('POST', '/api/sites/myapp/disable')).body.ok === true)
   check('symlink removed', !fs.existsSync(path.join(FIX, 'nginx', 'sites-enabled', 'myapp.conf')))
+  // These share the `/api/sites/:name/<verb>` shape. They are separate routes, but a single
+  // `/:toggle` route would match them too and shadow whichever is declared later — and the
+  // toggle handler answers 200, so asserting the *body* is what proves which handler ran.
+  check('unknown action is not a toggle', (await req('POST', '/api/sites/myapp/frobnicate')).status === 404)
+  check('upload-zip reaches its own handler',
+    (await req('POST', '/api/sites/myapp/upload-zip')).body.error === 'site or zip missing')
 
   // update with all features: proxy + upstream + rate limit + ip rules + https selfsigned
   const upd = await req('PUT', '/api/sites/myapp', {

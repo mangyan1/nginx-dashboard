@@ -1,7 +1,7 @@
 # Real-nginx end-to-end: node + nginx + openssl + curl in one image, so test/e2e.mjs
 # can drive the live API against a real nginx and check what nginx actually does.
 # Build & run: npm run test:e2e
-FROM node:20-bookworm
+FROM node:24-bookworm
 
 # nginx (real reloads, real -t), openssl (certs), curl (traffic as nginx sees it),
 # logrotate (the rotate endpoint). systemd is deliberately absent — start/stop/restart

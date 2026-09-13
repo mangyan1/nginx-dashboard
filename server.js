@@ -236,8 +236,12 @@ app.delete('/api/sites/:name', async (req, res) => {
   res.json({ ok: true })
 })
 
-app.post('/api/sites/:name/:toggle(enable|disable)', async (req, res) => {
-  const { name, toggle } = req.params
+// Express 5 (path-to-regexp 8) dropped inline regex params, so `:toggle(enable|disable)`
+// becomes two literal routes instead of one. Literal segments keep the original matching
+// exactly — a single `/:toggle` route would also match /files, /upload-zip and /selfsigned,
+// which share this shape and are declared below, so it would shadow all three.
+const toggleSite = toggle => async (req, res) => {
+  const { name } = req.params
   if (!findSite(name)) return res.status(404).json({ error: 'not found' })
   const result = await apply([enabledConfPath(name)], () => {
     if (toggle === 'enable') {
@@ -249,7 +253,10 @@ app.post('/api/sites/:name/:toggle(enable|disable)', async (req, res) => {
   }, { label: `${toggle} site ${name}` })
   if (!result.ok) return res.status(422).json({ error: result.output })
   res.json({ ok: true })
-})
+}
+
+app.post('/api/sites/:name/enable', toggleSite('enable'))
+app.post('/api/sites/:name/disable', toggleSite('disable'))
 
 // ---------- change history: undo a change that turned out badly ----
 // Every successful mutation above is snapshotted by safeApply. Only *failed* changes used to
