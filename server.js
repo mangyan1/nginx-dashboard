@@ -94,7 +94,10 @@ app.get('/api/status', async (req, res) => {
     const r = await shell('systemctl', ['is-active', 'nginx'])
     active = r.status === 0 ? r.stdout.trim() : r.stderr.trim()
   }
-  res.json({ active, version: (v.stderr || v.stdout).trim(), dry: DRY })
+  // `nginx -v` prints to stderr. When the binary is missing that slot holds ENOENT text
+  // instead, which the UI would render as the version — so only send it when it is one.
+  const raw = (v.stderr || v.stdout).trim()
+  res.json({ active, version: raw.includes('nginx/') ? raw : '', dry: DRY })
 })
 
 app.post('/api/nginx/:action', async (req, res) => {

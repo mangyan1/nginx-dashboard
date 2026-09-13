@@ -37,7 +37,11 @@ function Pane({ file, label }) {
 export default function Logs() {
   const [result, setResult] = useState(null)
   const rotate = () => api('POST', '/api/logs/rotate').then(setResult).catch(e => setResult({ ok: false, output: e.message }))
-  const purge = () => api('POST', '/api/logs/purge', { days: 30 }).then(setResult).catch(e => setResult({ ok: false, output: e.message }))
+  const purge = () => {
+    // irreversible: the rotated files are deleted, not archived
+    if (!confirm('Delete rotated log files older than 30 days? This cannot be undone.')) return
+    api('POST', '/api/logs/purge', { days: 30 }).then(setResult).catch(e => setResult({ ok: false, output: e.message }))
+  }
 
   return (
     <div className="logs">

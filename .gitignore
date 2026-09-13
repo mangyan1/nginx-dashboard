@@ -5,3 +5,5 @@ test/fixtures/
 test/probe-*
 *.log
 .env
+# Playwright MCP scratch dir — screenshots and snapshots from driving the UI locally
+.playwright-mcp/

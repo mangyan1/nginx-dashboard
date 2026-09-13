@@ -12,6 +12,7 @@ export default function App() {
   const [authed, setAuthed] = useState(null) // null = unknown
   const [tab, setTab] = useState(() => location.hash.slice(1) || 'control')
   const [status, setStatus] = useState(null)
+  const [dirty, setDirty] = useState(false) // a site form has unsaved edits
 
   const probe = () => api('GET', '/api/status')
     .then(s => { setStatus(s); setAuthed(true) })
@@ -24,29 +25,57 @@ export default function App() {
     return () => clearInterval(t)
   }, [])
 
+  // Switching module unmounts the form, which would drop the edits silently. So does
+  // closing the tab, which the module guard cannot see — hence the beforeunload too.
+  useEffect(() => {
+    if (!dirty) return
+    const warn = e => { e.preventDefault(); e.returnValue = '' }
+    addEventListener('beforeunload', warn)
+    return () => removeEventListener('beforeunload', warn)
+  }, [dirty])
+
+  const go = t => {
+    if (t === tab) return
+    if (dirty && !confirm('Discard unsaved changes to this site?')) return
+    setDirty(false)
+    setTab(t)
+    location.hash = t
+  }
+
   if (authed === null) return <div className="loading">…</div>
   if (!authed) return <Login onLogin={probe} />
 
+  // in dry mode `active` is already the word "dry", so appending another "(dry)" read "dry (dry)"
+  const dry = status?.dry
+  const glyph = dry ? '◌' : status?.active === 'active' ? '●' : '○'
+  const state = dry ? 'dry run' : (status?.active || 'unknown')
+
   return (
     <div className="app">
-      <header>
-        <h1>NGINX <small>dashboard</small></h1>
-        <span className={`status ${status?.active}`}>
-          {status?.active === 'active' ? '●' : status?.active === 'inactive' ? '○' : '◌'} {status?.active}
-          {status?.dry ? ' (dry)' : ''}
-        </span>
+      <aside className="sidebar">
+        <div className="brand">
+          <img src="/favicon.svg" alt="" width="26" height="26" />
+          <span>NGINX <small>dashboard</small></span>
+        </div>
         <nav>
           {TABS.map(t => (
-            <button key={t} className={tab === t ? 'active' : ''} onClick={() => { setTab(t); location.hash = t }}>
-              {t}
+            <button key={t} className={tab === t ? 'active' : ''} onClick={() => go(t)}>
+              {t[0].toUpperCase() + t.slice(1)}
             </button>
           ))}
-          <button className="logout" onClick={() => api('POST', '/api/logout').then(() => setAuthed(false))}>logout</button>
         </nav>
-      </header>
+        <div className="sidebar-foot">
+          <span className={`status ${status?.active}`} title={dry ? 'writes files but never calls nginx' : ''}>
+            {glyph} {state}
+          </span>
+          <button className="logout" onClick={() => api('POST', '/api/logout').then(() => setAuthed(false))}>
+            Sign out
+          </button>
+        </div>
+      </aside>
       <main>
         {tab === 'control' && <Control status={status} onStatus={probe} />}
-        {tab === 'sites' && <Sites />}
+        {tab === 'sites' && <Sites onDirty={setDirty} />}
         {tab === 'logs' && <Logs />}
         {tab === 'metrics' && <Metrics status={status} />}
       </main>

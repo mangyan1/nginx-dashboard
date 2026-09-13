@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="nginx dashboard">
+  <rect width="64" height="64" rx="9" fill="#000"/>
+  <g fill="#009639" fill-rule="evenodd">
+    <!-- N: thick stems, thinner diagonal — the nginx proportion. The notch between the
+         diagonal and the right stem opens upward the way an N's does, so one polygon. -->
+    <path d="M9 13H21L32 39.1V13H39V51H32L16 13V51H9Z"/>
+    <!-- D: bowl overlapping the shared stem by 2 units, so two same-colour fills do not
+         leave an antialiasing seam along the line where they meet -->
+    <path d="M37 13H44L56 24V40L44 51H37Z M37 20H44L49 25V39L44 44H37Z"/>
+  </g>
+</svg>

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { Btn, Field, Toggle, Section, Out, useAsync } from './ui.jsx'
 import FileManager from './FileManager.jsx'
@@ -8,7 +8,7 @@ const CACHE_EXT = ['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'woff
 
 const blank = { name: '', domains: '', root: '', port: 80 }
 
-export default function SiteForm({ site, onSaved, onDeleted }) {
+export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
   const isNew = !site
   const [s, setS] = useState(() => ({
     name: site?.name || '',
@@ -27,6 +27,10 @@ export default function SiteForm({ site, onSaved, onDeleted }) {
   }))
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
+  // the state this form was opened (or last saved) with, so "dirty" means "differs from that"
+  const [baseline, setBaseline] = useState(() => JSON.stringify(s))
+  const dirty = JSON.stringify(s) !== baseline
+  useEffect(() => { onDirty?.(dirty) }, [dirty, onDirty])
 
   const set = (patch, key) => setS(prev => ({ ...prev, ...(key ? { [key]: { ...prev[key], ...patch } } : patch) }))
   const setArr = (key, arr) => setS(prev => ({ ...prev, [key]: arr }))
@@ -47,6 +51,9 @@ export default function SiteForm({ site, onSaved, onDeleted }) {
         ? await api('POST', '/api/sites', p)
         : await api('PUT', `/api/sites/${s.name}`, p)
       setResult({ ok: true, output: 'saved & applied' })
+      // re-baseline: an existing site keeps its key, so the form is not remounted after a save
+      // and would otherwise stay "dirty" forever, prompting on the next click
+      setBaseline(JSON.stringify(s))
       onSaved(p.name)
     } catch (e) {
       setResult({ ok: false, output: e.message })
