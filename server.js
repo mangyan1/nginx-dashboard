@@ -409,7 +409,7 @@ app.get('/api/logs/tail', (req, res) => {
   child.on('error', () => { res.end(); stop() }) // tail missing (e.g. dev machine)
   res.on('close', stop)
   req.on('close', stop)
-  // ponytail: no per-file guard against duplicate streams; only this dashboard consumes it
+  // no per-file guard against duplicate streams; only this dashboard consumes it
 })
 
 app.post('/api/logs/rotate', async (req, res) => {
