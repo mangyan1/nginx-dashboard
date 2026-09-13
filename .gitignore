@@ -7,3 +7,8 @@ test/probe-*
 .env
 # Playwright MCP scratch dir — screenshots and snapshots from driving the UI locally
 .playwright-mcp/
+
+# Local-only: agent context handoff and the ops/secret policy. Both are kept on disk for
+# working here, and neither belongs in the published repo — see the untracked GUARDRAIL.md.
+AGENT.md
+GUARDRAIL.md
