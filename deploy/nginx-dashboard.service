@@ -1,0 +1,17 @@
+[Unit]
+Description=NGINX Dashboard
+After=network.target nginx.service
+
+[Service]
+ExecStart=/usr/bin/node /opt/nginx-dashboard/server.js
+Environment=DASH_PASSWORD=change-me
+Environment=NODE_ENV=production
+Environment=DASH_HOST=127.0.0.1
+Environment=DASH_PORT=3000
+Restart=on-failure
+# hardening that doesn't fight the app's need to write /etc/nginx and run nginx
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

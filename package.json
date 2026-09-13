@@ -1,0 +1,29 @@
+{
+  "name": "nginx-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web dashboard that controls NGINX via buttons instead of the command line",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server.js",
+    "test": "node test/smoke.mjs && node test/safe-apply.mjs",
+    "test:docker": "node test/docker-conf.mjs",
+    "guard": "node scripts/guardrail.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "multer": "^2.0.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.0",
+    "chart.js": "^4.4.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "vite": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
