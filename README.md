@@ -26,7 +26,7 @@ Runs next to nginx on your Ubuntu/Debian server.
   are looking at instead of saving it for Enable. One honest caveat: `nginx -s
   reload` exits 0 even when the master then refuses the config at runtime, so a
   port that is already taken leaves the UI saying "enabled" while nginx serves the
-  previous config. See `ARCHITECTURE.md` §3.
+  previous config.
 - **Every successful change is undoable.** `GET /api/history` lists the last 20
   changes (newest first, with the files each one touched);
   `POST /api/history/:id/revert` puts them back — through the same pipeline, so a
@@ -56,6 +56,4 @@ npm run dev     # or: Vite dev server at :5173, proxies /api to :3000
 ```
 
 See `deploy/README.md` for deployment (installer script, systemd unit, dev/dry
-mode). See `ARCHITECTURE.md` for the invariants the code exists to enforce, the
-file map, and the traps — read that before changing the generator or the apply
-pipeline.
+mode).

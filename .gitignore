@@ -8,7 +8,9 @@ test/probe-*
 # Playwright MCP scratch dir — screenshots and snapshots from driving the UI locally
 .playwright-mcp/
 
-# Local-only working notes: an agent context handoff and the ops/secret policy. Both are
-# kept on disk for working here and are deliberately not published.
+# Local-only working notes: an agent context handoff, the ops/secret policy, and the
+# architecture notes. All three are kept on disk for working here and are deliberately
+# not published.
 AGENT.md
 GUARDRAIL.md
+ARCHITECTURE.md
