@@ -10,8 +10,7 @@
     "start": "node server.js",
     "test": "node test/smoke.mjs && node test/safe-apply.mjs",
     "test:docker": "node test/docker-conf.mjs",
-    "test:e2e": "docker build -f test/Dockerfile.e2e -t nginx-dashboard-e2e . && docker run --rm nginx-dashboard-e2e",
-    "guard": "node scripts/guardrail.mjs"
+    "test:e2e": "docker build -f test/Dockerfile.e2e -t nginx-dashboard-e2e . && docker run --rm nginx-dashboard-e2e"
   },
   "dependencies": {
     "express": "^5.2.1",

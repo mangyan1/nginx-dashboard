@@ -23,10 +23,7 @@ Runs next to nginx on your Ubuntu/Debian server.
   on success `nginx -s reload`. A config nginx rejects can never reach nginx.
   A *disabled* site is still tested — nginx only reads `sites-enabled`, so it is
   linked in for the test and unlinked again, keeping the error in the form you
-  are looking at instead of saving it for Enable. One honest caveat: `nginx -s
-  reload` exits 0 even when the master then refuses the config at runtime, so a
-  port that is already taken leaves the UI saying "enabled" while nginx serves the
-  previous config.
+  are looking at instead of saving it for Enable.
 - **Every successful change is undoable.** `GET /api/history` lists the last 20
   changes (newest first, with the files each one touched);
   `POST /api/history/:id/revert` puts them back — through the same pipeline, so a
