@@ -6,11 +6,11 @@ import multer from 'multer'
 import { spawn } from 'node:child_process' // tail -F for SSE; args are a fixed array, never user strings
 import {
   PATHS, MANIFEST, HTTP_CONF, mkdirs, validName, safeJoin, safeApply,
-  nginxTest, systemctl, shell,
+  nginxTest, systemctl, shell, listHistory, revertHistory,
 } from './lib/nginx.js'
 import {
   defaultSite, readManifest, writeManifest, siteConfPath, enabledConfPath, certDir,
-  renderHttpConf, renderSiteConf, writeHtpasswd, validateSite,
+  renderHttpConf, renderSiteConf, writeHtpasswd, validateSite, driftOf, httpConfDrift,
 } from './lib/manifest.js'
 
 const PORT = process.env.DASH_PORT || 3000
@@ -145,6 +145,13 @@ function writeSiteFiles(site, m) {
 // `files` means a failed nginx -t rolls the conf back while the manifest keeps the change.
 const siteFiles = name => [siteConfPath(name), HTTP_CONF, MANIFEST]
 
+// A disabled site's conf must still be checked: `nginx -t` reads only sites-enabled, so without
+// this it saves with a 200 and only fails later, on Enable. Harmless to link in for the test —
+// see safeApply's testLink.
+const testLinkFor = name => (fs.existsSync(enabledConfPath(name))
+  ? undefined
+  : { path: enabledConfPath(name), target: siteConfPath(name) })
+
 app.get('/api/sites', (req, res) => {
   const m = readManifest()
   const managed = new Set(m.sites.map(s => s.name))
@@ -153,9 +160,11 @@ app.get('/api/sites', (req, res) => {
     : []
   res.json({
     sites: [
-      ...m.sites.map(s => ({ ...s, managed: true, ...siteState(s.name) })),
+      ...m.sites.map(s => ({ ...s, managed: true, ...siteState(s.name), drift: driftOf(s) })),
       ...onDisk.filter(n => !managed.has(n)).map(n => ({ name: n, managed: false, ...siteState(n) })),
     ],
+    // every site's upstreams and rate-limit zones live in this one file
+    httpConfDrift: httpConfDrift(m.sites),
   })
 })
 
@@ -164,7 +173,7 @@ app.get('/api/sites/:name', (req, res) => {
   if (!validName(name)) return res.status(400).json({ error: 'invalid name' })
   const site = findSite(name)
   if (!site) return res.status(404).json({ error: 'not found (unmanaged sites are read-only)' })
-  res.json({ site, ...siteState(name) })
+  res.json({ site, ...siteState(name), drift: driftOf(site) })
 })
 
 app.post('/api/sites', async (req, res) => {
@@ -177,15 +186,18 @@ app.post('/api/sites', async (req, res) => {
   const errs = validateSite(site)
   if (errs.length) return res.status(400).json({ error: errs.join('; ') })
 
-  // create docroot + placeholder so the site serves something immediately
+  m.sites.push(site)
+  await writeHtpasswd(site)
+  const result = await apply(siteFiles(name), () => writeSiteFiles(site, m), { label: `create site ${name}`, testLink: testLinkFor(name) })
+  if (!result.ok) return res.status(422).json({ error: result.output })
+
+  // docroot + placeholder so the site serves something immediately. Created only once the conf
+  // is accepted: a create that nginx rejects must leave nothing behind, and nginx -t does not
+  // care whether the docroot exists — only serving it does.
   fs.mkdirSync(site.root, { recursive: true })
   const idx = path.join(site.root, 'index.html')
   if (!fs.existsSync(idx)) fs.writeFileSync(idx, `<h1>${site.domains[0]}</h1>\n<p>Deployed via nginx-dashboard.</p>\n`)
 
-  m.sites.push(site)
-  await writeHtpasswd(site)
-  const result = await apply(siteFiles(name), () => writeSiteFiles(site, m))
-  if (!result.ok) return res.status(422).json({ error: result.output })
   res.json({ ok: true, site })
 })
 
@@ -201,7 +213,7 @@ app.put('/api/sites/:name', async (req, res) => {
 
   await writeHtpasswd(site)
   m.sites = m.sites.map(s => (s.name === name ? site : s))
-  const result = await apply(siteFiles(name), () => writeSiteFiles(site, m))
+  const result = await apply(siteFiles(name), () => writeSiteFiles(site, m), { label: `update site ${name}`, testLink: testLinkFor(name) })
   if (!result.ok) return res.status(422).json({ error: result.output })
   res.json({ ok: true, site })
 })
@@ -216,7 +228,7 @@ app.delete('/api/sites/:name', async (req, res) => {
     fs.rmSync(siteConfPath(name), { force: true })
     fs.rmSync(enabledConfPath(name), { force: true })
     fs.writeFileSync(HTTP_CONF, renderHttpConf(m.sites))
-  })
+  }, { label: `delete site ${name}` })
   if (!result.ok) return res.status(422).json({ error: result.output })
   res.json({ ok: true })
 })
@@ -231,9 +243,20 @@ app.post('/api/sites/:name/:toggle(enable|disable)', async (req, res) => {
     } else {
       fs.rmSync(enabledConfPath(name), { force: true })
     }
-  })
+  }, { label: `${toggle} site ${name}` })
   if (!result.ok) return res.status(422).json({ error: result.output })
   res.json({ ok: true })
+})
+
+// ---------- change history: undo a change that turned out badly ----
+// Every successful mutation above is snapshotted by safeApply. Only *failed* changes used to
+// be reversible; a change that worked and then turned out to be wrong had no way back.
+app.get('/api/history', (req, res) => res.json({ entries: listHistory() }))
+
+app.post('/api/history/:id/revert', async (req, res) => {
+  const result = await revertHistory(req.params.id)
+  if (!result.ok) return res.status(422).json({ error: result.output })
+  res.json({ ok: true, output: result.output })
 })
 
 // ---------- module 2: docroot file manager ----------
@@ -322,7 +345,7 @@ app.post('/api/sites/:name/selfsigned', async (req, res) => {
     if (r.status !== 0) return res.status(500).json({ error: r.stderr.slice(0, 500) })
   }
   site.https.mode = 'selfsigned'
-  const result = await apply(siteFiles(site.name), () => writeSiteFiles(site, m))
+  const result = await apply(siteFiles(site.name), () => writeSiteFiles(site, m), { label: `self-signed cert for ${site.name}` })
   if (!result.ok) return res.status(422).json({ error: result.output })
   res.json({ ok: true })
 })
@@ -339,7 +362,7 @@ app.post('/api/cert', async (req, res) => {
   const site = m.sites.find(s => s.domains.includes(domain))
   if (site) {
     site.https.mode = 'certbot'
-    const result = await apply(siteFiles(site.name), () => writeSiteFiles(site, m))
+    const result = await apply(siteFiles(site.name), () => writeSiteFiles(site, m), { label: `certbot cert for ${domain}` })
     if (!result.ok) return res.status(422).json({ error: result.output })
   }
   res.json({ ok: true, output: r.stdout.slice(0, 2000) })
@@ -413,7 +436,7 @@ server {
 if (!fs.existsSync(STATUS_CONF)) {
   // awaited so the server is not listening before stub_status is live — otherwise a first
   // /api/metrics call races the nginx -t + reload this triggers and 503s
-  await apply([STATUS_CONF], () => fs.writeFileSync(STATUS_CONF, STATUS_CONF_TEXT))
+  await apply([STATUS_CONF], () => fs.writeFileSync(STATUS_CONF, STATUS_CONF_TEXT), { label: 'enable metrics (stub_status)' })
 }
 
 app.get('/api/metrics', async (req, res) => {

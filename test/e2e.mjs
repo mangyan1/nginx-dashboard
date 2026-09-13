@@ -141,15 +141,59 @@ try {
   check('manifest rolled back with it', read(MANIFEST) === manifestBefore)
   check('site still served after the failed change', await serves('myapp.test', 'myapp.test'))
 
-  // A *disabled* site's conf is never validated: nginx only reads sites-enabled, so `nginx -t`
-  // does not see it — hence the 200 above. The bad config still cannot reach the running
-  // nginx, because enabling pushes the symlink through safeApply. The catch lands here.
+  // A *disabled* site's conf is invisible to `nginx -t`, which reads only sites-enabled. It used
+  // to save with a 200 and fail later, on Enable. safeApply now links it in for the test alone,
+  // so the error arrives while the user is still looking at the form.
   const ghost = await req('POST', '/api/sites', { name: 'ghost', domains: ['ghost.test'], https: { mode: 'certbot' } })
-  check('a disabled site saves unvalidated (nginx -t cannot see it)', ghost.status === 200, `${ghost.status} ${JSON.stringify(ghost.body?.error)}`)
-  const ghostOn = await req('POST', '/api/sites/ghost/enable')
-  check('enabling it is rejected by real nginx', ghostOn.status === 422, `${ghostOn.status} ${JSON.stringify(ghostOn.body)}`)
-  check('the enable was rolled back', !fs.existsSync('/etc/nginx/sites-enabled/ghost.conf'))
+  check('a disabled site with a bad config is rejected at save time', ghost.status === 422, `${ghost.status} ${JSON.stringify(ghost.body?.error)}`)
+  check('...with nginx\'s own error', String(ghost.body.error || '').includes('nginx'), JSON.stringify(ghost.body))
+  check('...leaving no conf or symlink behind', !fs.existsSync(path.join(AVAIL, 'ghost.conf')) && !fs.existsSync('/etc/nginx/sites-enabled/ghost.conf'))
+  check('...no docroot behind', !fs.existsSync('/var/www/ghost'))
+  check('...and not in the manifest', !read(MANIFEST).includes('ghost'))
   check('nginx stayed healthy', sh('nginx', ['-t']).ok)
+
+  // ...and the fix must not reject a *good* disabled site, which would be worse than the gap
+  const dormant = await req('POST', '/api/sites', { name: 'dormant', domains: ['dormant.test'] })
+  check('a good disabled site still saves', dormant.status === 200, JSON.stringify(dormant.body))
+  check('...and stays disabled', !fs.existsSync('/etc/nginx/sites-enabled/dormant.conf'))
+  check('...and its conf is on disk', read(path.join(AVAIL, 'dormant.conf'))?.includes('dormant.test'))
+
+  // ---- drift: is the conf on disk still the one the manifest generates? ----
+  // The next click would overwrite a hand-edit without a word, so the API has to admit it first.
+  let list = await req('GET', '/api/sites')
+  check('a freshly generated site reports no drift', list.body.sites.find(s => s.name === 'myapp')?.drift === null, JSON.stringify(list.body.sites.find(s => s.name === 'myapp')?.drift))
+  fs.appendFileSync(path.join(AVAIL, 'myapp.conf'), '# edited by hand at 3am\n')
+  list = await req('GET', '/api/sites')
+  check('a hand-edited conf is reported as drift', list.body.sites.find(s => s.name === 'myapp')?.drift === 'modified', JSON.stringify(list.body.sites.find(s => s.name === 'myapp')?.drift))
+  check('the shared http conf reports clean', list.body.httpConfDrift === false, String(list.body.httpConfDrift))
+  // a re-save regenerates the conf, so the drift resolves — and the hand-edit is gone, which is
+  // exactly why it had to be reported first
+  await req('PUT', '/api/sites/myapp', { ...(await req('GET', '/api/sites/myapp')).body.site })
+  list = await req('GET', '/api/sites')
+  check('saving the site regenerates it and clears the drift', list.body.sites.find(s => s.name === 'myapp')?.drift === null)
+  check('...having overwritten the hand-edit', !read(path.join(AVAIL, 'myapp.conf')).includes('3am'))
+
+  // ---- history: undo a change that succeeded and turned out wrong ----
+  const beforeUndo = read(path.join(AVAIL, 'twin.conf'))
+  check('history is served', Array.isArray((await req('GET', '/api/history')).body.entries))
+  const del = await req('DELETE', '/api/sites/twin')
+  check('deleting twin works', del.status === 200)
+  const hist = (await req('GET', '/api/history')).body.entries
+  check('the delete is in the history', hist[0]?.label === 'delete site twin', JSON.stringify(hist[0]?.label))
+  check('...and names the conf it removed', hist[0]?.paths.some(p => p.endsWith('twin.conf')), JSON.stringify(hist[0]?.paths))
+
+  const undo = await req('POST', `/api/history/${hist[0].id}/revert`)
+  check('revert ok', undo.status === 200, JSON.stringify(undo.body))
+  check('the deleted conf is back, byte-for-byte', read(path.join(AVAIL, 'twin.conf')) === beforeUndo)
+  check('the site is back in the manifest', (await req('GET', '/api/sites')).body.sites.some(s => s.name === 'twin'))
+  check('the revert is itself undoable', (await req('GET', '/api/history')).body.entries[0].label === 'undo: delete site twin')
+  check('a traversal-shaped history id is refused', (await req('POST', '/api/history/..%2f..%2fmanifest.json/revert')).status === 422)
+  check('nginx -t passes after the revert', sh('nginx', ['-t']).ok)
+
+  // the docroot of a site that was deleted is *not* restored — this is a config history
+  const restoreServed = await req('POST', '/api/sites/twin/enable')
+  check('the restored site can be enabled', restoreServed.status === 200, JSON.stringify(restoreServed.body))
+  await req('POST', '/api/sites/twin/disable')
 
   // ---- module 4: real openssl ----
   const cert = await req('POST', '/api/sites/myapp/selfsigned')

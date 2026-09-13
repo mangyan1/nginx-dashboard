@@ -21,11 +21,22 @@ Runs next to nginx on your Ubuntu/Debian server.
 - Every change goes through one pipeline: write file → `nginx -t` →
   on failure restore the previous file byte-for-byte and show the error →
   on success `nginx -s reload`. A config nginx rejects can never reach nginx.
-  Two honest caveats: a *disabled* site's `.conf` is not validated (nginx reads
-  only `sites-enabled`), so that error surfaces when you enable it; and
-  `nginx -s reload` exits 0 even when the master then refuses the config at
-  runtime, so a port that is already taken will leave the UI saying "enabled"
-  while nginx serves the previous config. See `AGENT.md` §4.
+  A *disabled* site is still tested — nginx only reads `sites-enabled`, so it is
+  linked in for the test and unlinked again, keeping the error in the form you
+  are looking at instead of saving it for Enable. One honest caveat: `nginx -s
+  reload` exits 0 even when the master then refuses the config at runtime, so a
+  port that is already taken leaves the UI saying "enabled" while nginx serves the
+  previous config. See `AGENT.md` §4.
+- **Every successful change is undoable.** `GET /api/history` lists the last 20
+  changes (newest first, with the files each one touched);
+  `POST /api/history/:id/revert` puts them back — through the same pipeline, so a
+  revert is tested and reloaded like anything else, and is itself undoable.
+  Config and manifest only: reverting a deletion restores the conf, not the docroot.
+- **Hand edits are reported, not silently eaten.** The next click regenerates a
+  site's `.conf` from the manifest, so an edit made outside the dashboard would
+  vanish without a word. `GET /api/sites` returns `drift` per site
+  (`'modified' | 'missing' | null`) plus `httpConfDrift` for the shared file, so the
+  UI can warn first. Nothing is repaired automatically — that is the point.
 - http-level directives (upstreams, rate-limit zones) live in the
   dashboard-owned `/etc/nginx/conf.d/00-dashboard.conf`. `nginx.conf` is
   never touched.

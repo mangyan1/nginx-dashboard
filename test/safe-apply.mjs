@@ -14,8 +14,8 @@ fs.mkdirSync(D, { recursive: true })
 process.env.DASH_NGINX_DIR = path.join(D, 'nginx')
 process.env.DASH_STATE_DIR = path.join(D, 'state')
 process.env.DASH_LOG_DIR = path.join(D, 'logs')
-const { safeApply, hooks, MANIFEST, PATHS } = await import('../lib/nginx.js')
-const { defaultSite, renderSiteConf, validateSite } = await import('../lib/manifest.js')
+const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory } = await import('../lib/nginx.js')
+const { defaultSite, renderSiteConf, validateSite, siteConfPath, driftOf, httpConfDrift, renderHttpConf } = await import('../lib/manifest.js')
 
 const realRun = hooks.run
 let failed = 0
@@ -140,6 +140,84 @@ const withProxy = renderSiteConf({ ...mk('p'), root: '/var/www/p', proxy: [{ pat
 check('proxy site still emits its docroot', withProxy.includes('root /var/www/p;'), withProxy)
 check('proxy site still emits a proxy location', withProxy.includes('location /api {'), withProxy)
 check('static-cache block survives alongside a proxy rule', withProxy.includes('expires 30d;'), withProxy)
+
+// ---- 9. history: a change that *succeeded* and turned out to be wrong ----
+// Sections 1-5 prove a failed change rolls back. That leaves the case this exists for: nginx
+// accepted it, it is live, and it was the wrong change. Nothing else can undo that.
+hooks.run = passNginx
+fs.rmSync(path.join(PATHS.stateDir, 'history'), { recursive: true, force: true })
+seed()
+fs.writeFileSync(conf, 'GOOD CONF\n')
+r = await safeApply([conf], () => { fs.writeFileSync(conf, 'WORSE CONF\n') }, { label: 'break it' })
+check('the successful change reports ok', r.ok, JSON.stringify(r))
+check('history has the change', listHistory().length === 1 && listHistory()[0].label === 'break it', JSON.stringify(listHistory()))
+check('history names the file it touched', listHistory()[0].paths.includes(conf), JSON.stringify(listHistory()[0].paths))
+
+const undo = await revertHistory(listHistory()[0].id)
+check('revert reports ok', undo.ok, JSON.stringify(undo))
+check('revert restored the previous content', read(conf) === 'GOOD CONF\n', read(conf))
+check('the revert is itself undoable', listHistory().length === 2 && listHistory()[0].label === 'undo: break it', JSON.stringify(listHistory().map(h => h.label)))
+check('undo of the undo puts the change back', (await revertHistory(listHistory()[0].id)).ok && read(conf) === 'WORSE CONF\n', read(conf))
+check('the label is not trusted as a path', !(await revertHistory('../../etc/passwd')).ok && !(await revertHistory('nope.json')).ok)
+check('a corrupt entry is not fatal to the list', (() => {
+  fs.writeFileSync(path.join(PATHS.stateDir, 'history', '1700000000000-0000ff.json'), '{ truncated')
+  const l = listHistory()
+  fs.rmSync(path.join(PATHS.stateDir, 'history', '1700000000000-0000ff.json'), { force: true })
+  return l.length === 3 && l.every(e => e.label)
+})(), JSON.stringify(listHistory().map(h => h.label)))
+
+// a change that was rejected never happened, so it must not be offered for undo
+const before = listHistory().length
+hooks.run = failTest
+seed()
+await safeApply([conf], () => { fs.writeFileSync(conf, 'NEW CONF\n') }, { label: 'rejected' })
+check('a rejected change records nothing', listHistory().length === before, JSON.stringify(listHistory().map(h => h.label)))
+
+// ---- 10. history must remember a symlink as a symlink ----
+// sites-enabled/*.conf is a symlink pointing at sites-available. readFileSync follows it, so a
+// backup that stores text restores a plain copy of the target — the site keeps serving, then
+// silently stops tracking the conf it is supposed to be a view of.
+hooks.run = passNginx
+const link = path.join(D, 'enabled.conf')
+fs.rmSync(link, { force: true })
+fs.writeFileSync(conf, 'REAL CONF\n')
+fs.symlinkSync(conf, link, 'file')
+r = await safeApply([link], () => fs.rmSync(link, { force: true }), { label: 'disable' })
+check('disabling through the link reports ok', r.ok && !fs.existsSync(link), JSON.stringify(r))
+check('undo brings the link back', (await revertHistory(listHistory()[0].id)).ok)
+check('...as a symlink, not a copy', fs.lstatSync(link).isSymbolicLink() && fs.readlinkSync(link) === conf, String(fs.lstatSync(link).isSymbolicLink()))
+check('...and the real conf was never rewritten', read(conf) === 'REAL CONF\n', read(conf))
+
+// ---- 11. retention: keep the newest, drop the oldest ----
+hooks.run = passNginx
+fs.rmSync(path.join(PATHS.stateDir, 'history'), { recursive: true, force: true })
+seed()
+for (let i = 0; i < 22; i++) await safeApply([conf], () => fs.writeFileSync(conf, `CONF ${i}\n`), { label: `change ${i}` })
+const kept = listHistory()
+check('retention keeps the newest 20', kept.length === 20, String(kept.length))
+check('retention drops the oldest, not the newest', kept[0].label === 'change 21' && kept.at(-1).label === 'change 2', `${kept[0].label} .. ${kept.at(-1).label}`)
+check('the oldest snapshots are gone from disk', !kept.some(e => e.label === 'change 0' || e.label === 'change 1'))
+
+// ---- 12. drift: the conf on disk is not the one this manifest generates ----
+// Nothing parses a conf back, so without this a hand-edit is silently overwritten by the next
+// click and the user never learns it happened.
+fs.mkdirSync(PATHS.sitesAvail, { recursive: true })
+const drifted = { ...defaultSite('drift'), domains: ['drift.test'] }
+fs.writeFileSync(siteConfPath('drift'), renderSiteConf(drifted))
+check('a conf we just generated is not drift', driftOf(drifted) === null, String(driftOf(drifted)))
+check('a whitespace-level edit counts', (fs.appendFileSync(siteConfPath('drift'), '\n'), driftOf(drifted) === 'modified'), String(driftOf(drifted)))
+fs.rmSync(siteConfPath('drift'), { force: true })
+check('a manifest entry with no conf is flagged', driftOf(drifted) === 'missing', String(driftOf(drifted)))
+fs.writeFileSync(siteConfPath('drift'), renderSiteConf({ ...drifted, port: 8080 }))
+check('a conf generated from a *different* site is flagged', driftOf(drifted) === 'modified', String(driftOf(drifted)))
+
+fs.rmSync(HTTP_CONF, { force: true })
+fs.mkdirSync(path.dirname(HTTP_CONF), { recursive: true })
+check('the shared http conf is flagged when absent', httpConfDrift([]) === true)
+fs.writeFileSync(HTTP_CONF, renderHttpConf([]))
+check('...and not when it matches', httpConfDrift([]) === false)
+fs.appendFileSync(HTTP_CONF, '# hand edit\n')
+check('...and flagged again once touched', httpConfDrift([]) === true)
 
 hooks.run = realRun
 fs.rmSync(D, { recursive: true, force: true })
