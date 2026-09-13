@@ -3,9 +3,37 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#000000" />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <title>NGINX Dashboard</title>
+
+    <title>NXD — NGINX dashboard</title>
+    <meta name="description" content="Observe, configure and deploy NGINX from a browser." />
+
+    <!-- The theme has to be on <html> before the first paint, or a light-mode reload flashes
+         the dark background for a frame. Dark is the brand's native surface, so it wins unless
+         the user has deliberately picked light — the OS preference is not consulted. -->
+    <script>
+      try {
+        document.documentElement.dataset.theme = localStorage.getItem('nxd-theme') || 'dark'
+      } catch (e) {
+        document.documentElement.dataset.theme = 'dark'
+      }
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#009639" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#009639" />
+    <meta name="color-scheme" content="dark light" />
   </head>
   <body>
     <div id="root"></div>

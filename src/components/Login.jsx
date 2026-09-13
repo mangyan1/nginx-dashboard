@@ -20,9 +20,15 @@ export default function Login({ onLogin }) {
 
   return (
     <form className="login" onSubmit={submit}>
-      <h1>NGINX <small>dashboard</small></h1>
+      <div className="mark">
+        <img src="/branding/logo-primary.svg" alt="" width="30" height="30" />
+        <b>NXD</b>
+        <span>observe · configure · deploy</span>
+      </div>
+      <h1>NGINX dashboard <small>sign in to manage this server</small></h1>
       <input type="password" placeholder="password" value={password}
-        onChange={e => setPassword(e.target.value)} autoFocus />
+        onChange={e => setPassword(e.target.value)} autoFocus
+        aria-label="Password" autoComplete="current-password" />
       <Btn kind="primary" disabled={busy || !password}>{busy ? '…' : 'Sign in'}</Btn>
       {err && <p className="err">{err}</p>}
     </form>

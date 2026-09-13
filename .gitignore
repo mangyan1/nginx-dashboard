@@ -18,3 +18,8 @@ ARCHITECTURE.md
 # Pre-push secret scanner. Local-only for the same reason as the notes above: its pattern
 # list is an inventory of what this project stores in plaintext, and where.
 scripts/guardrail.mjs
+
+# The supplied brand package — the working folder and the archive it arrived as. The assets the
+# app actually loads are copied into public/ and those *are* tracked; this is only the source.
+NXD-Branding-icons/
+NXD-Branding-icons.zip

@@ -8,9 +8,14 @@ Runs next to nginx on your Ubuntu/Debian server.
 | Tab | What it does |
 |---|---|
 | **control** | start / stop / restart nginx, reload config (`nginx -s reload`), test config (`nginx -t`) |
-| **sites** | create / edit / delete / enable / disable server blocks; per-site form covering: reverse-proxy rules, load-balancer upstreams (round robin / least connections / IP hash, http & https backends, passive health checks), HTTPS (self-signed / Let's Encrypt / existing certs, force-redirect), rate limiting, IP allow/deny lists, basic auth, gzip, HTTP/2 & HTTP/3, browser caching; built-in file manager with multi-upload and **deploy-folder-as-zip** |
+| **sites** | create / edit / delete / enable / disable server blocks; per-site form covering: reverse-proxy rules, load-balancer upstreams (round robin / least connections / IP hash, http & https backends, passive health checks), **PHP / FastCGI backends**, HTTPS on any port (self-signed / Let's Encrypt / existing certs, force-redirect, TLS-only vhosts), rate limiting, IP allow/deny lists, basic auth, gzip, HTTP/2 & HTTP/3 (+ reuseport), browser caching; built-in file manager with multi-upload and **deploy-folder-as-zip** |
 | **logs** | live tail of access.log & error.log (SSE), rotate, purge old rotated logs |
 | **metrics** | stub_status stats + live active-connections chart |
+
+The interface is a dark instrument panel in the NXD palette, with every number
+set in IBM Plex Mono. Archivo and IBM Plex Mono come from Google Fonts, so on a
+host with no outbound internet the browser falls back to system fonts — the
+layout does not depend on them.
 
 ## How it works
 
@@ -37,6 +42,28 @@ Runs next to nginx on your Ubuntu/Debian server.
 - http-level directives (upstreams, rate-limit zones) live in the
   dashboard-owned `/etc/nginx/conf.d/00-dashboard.conf`. `nginx.conf` is
   never touched.
+
+## Dynamic backends
+
+Any HTTP app — Node, Python, a container, a remote instance — is a **proxy rule**
+under *Reverse proxy*. PHP-FPM and anything else that speaks FastCGI is a
+**FastCGI endpoint** under *Application backend*:
+
+- Endpoint takes either form: `unix:/run/php/php8.3-fpm.sock` or `127.0.0.1:9000`.
+- The script file is checked for existence *before* FastCGI sees it
+  (`try_files $fastcgi_script_name =404`), so `/uploads/avatar.jpg/x.php` is a
+  404 rather than code handed to the interpreter.
+- **Front controller** sends unmatched paths to `/index.php` — that is the
+  WordPress / Laravel / Drupal shape.
+- The **TLS port** is a field, not a constant: `listen 44306 ssl`, the QUIC
+  listener, the `Alt-Svc` header and the plain-HTTP redirect all follow it. A
+  vhost can also be TLS-only (`serveHttp` off), and its `server_name` may be
+  left blank — it then answers to anything arriving on that port.
+
+Hardening emitted for every site: dotfiles denied (`location ~ /\.(?!well-known)`)
+in both blocks, TLS 1.2+ only, `ssl_session_tickets off`, and a shared session
+cache. Not emitted, deliberately: HSTS (a one-way door — needs its own toggle)
+and `client_max_body_size` (raise it yourself for large WordPress uploads).
 
 ## Security model
 

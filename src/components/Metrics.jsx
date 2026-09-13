@@ -12,7 +12,11 @@ const TILES = [
   ['waiting', 'Waiting'],
 ]
 
-export default function Metrics({ status }) {
+// chart.js takes real colour values, not var() references, so the tokens are read off the
+// document — once on mount and again whenever the theme flips.
+const token = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim()
+
+export default function Metrics({ status, theme }) {
   const [m, setM] = useState(null)
   const [err, setErr] = useState('')
   const history = useRef([])
@@ -23,11 +27,26 @@ export default function Metrics({ status }) {
     if (!canvas.current) return
     chart.current = new Chart(canvas.current, {
       type: 'line',
-      data: { labels: [], datasets: [{ label: 'active connections', data: [], borderColor: '#4f8ef7', backgroundColor: 'rgba(79,142,247,.15)', fill: true, tension: .3, pointRadius: 0 }] },
-      options: { animation: false, scales: { y: { beginAtZero: true } } },
+      data: { labels: [], datasets: [{ label: 'active connections', data: [], fill: true, tension: .3, pointRadius: 0, borderWidth: 1.5 }] },
+      options: {
+        animation: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { beginAtZero: true, grid: { color: () => token('--line-soft') }, ticks: { color: () => token('--dimmer'), font: { family: 'IBM Plex Mono, monospace', size: 10 } } },
+          x: { grid: { display: false }, ticks: { display: false } },
+        },
+      },
     })
     return () => chart.current?.destroy()
   }, [])
+
+  useEffect(() => {
+    const c = chart.current
+    if (!c) return
+    c.data.datasets[0].borderColor = token('--accent-ink')
+    c.data.datasets[0].backgroundColor = token('--accent-wash')
+    c.update('none')
+  }, [theme])
 
   useEffect(() => {
     const t = setInterval(async () => {
@@ -50,17 +69,33 @@ export default function Metrics({ status }) {
 
   return (
     <div className="metrics">
-      {err && <p className="err">{err}</p>}
+      <div className="sec-head">
+        <h2>Metrics</h2>
+        <p>stub_status, sampled every two seconds</p>
+      </div>
+      {err && <p className="banner mb">{err}</p>}
+
       <div className="tiles">
         {TILES.map(([k, label]) => (
           <div className="tile" key={k}>
-            <b>{m ? m[k] : '—'}</b>
             <span>{label}</span>
+            <b>{m ? m[k] : '—'}</b>
           </div>
         ))}
       </div>
-      <canvas ref={canvas} width="600" height="200" />
-      {status?.version && <p className="hint">{status.version}</p>}
+
+      <section className="panel">
+        <div className="panel-head">
+          <span className="panel-title">Active connections</span>
+          <span className="spacer" />
+          <span className="chip">last 60 samples</span>
+        </div>
+        <div className="panel-body">
+          <canvas ref={canvas} width="900" height="220" />
+        </div>
+      </section>
+
+      {status?.version && <p className="sub">{status.version}</p>}
     </div>
   )
 }

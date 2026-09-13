@@ -15,7 +15,7 @@ process.env.DASH_NGINX_DIR = path.join(D, 'nginx')
 process.env.DASH_STATE_DIR = path.join(D, 'state')
 process.env.DASH_LOG_DIR = path.join(D, 'logs')
 const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory } = await import('../lib/nginx.js')
-const { defaultSite, renderSiteConf, validateSite, siteConfPath, driftOf, httpConfDrift, renderHttpConf } = await import('../lib/manifest.js')
+const { defaultSite, renderSiteConf, validateSite, siteConfPath, driftOf, httpConfDrift, renderHttpConf, readManifest } = await import('../lib/manifest.js')
 
 const realRun = hooks.run
 let failed = 0
@@ -132,6 +132,78 @@ check('dangling upstream reference rejected', validateSite(dangling).some(e => e
 check('a clean site passes validation', validateSite({ ...defaultSite('x'), domains: ['ok.test'], upstreams: mk('x').upstreams, proxy: mk('x').proxy }).length === 0, JSON.stringify(validateSite({ ...defaultSite('x'), domains: ['ok.test'], upstreams: mk('x').upstreams, proxy: mk('x').proxy })))
 const badRoot = { ...defaultSite('x'), domains: ['ok.test'], root: '/var/www/x; }\nserver { root /etc;' }
 check('injection-shaped docroot rejected', validateSite(badRoot).some(e => e.includes('invalid document root')), JSON.stringify(validateSite(badRoot)))
+
+// ---- 7b. the dynamic-backend surface ----
+// fastcgi_pass and `index` are emitted verbatim, so their validators are the only thing between
+// the form and a conf file.
+for (const endpoint of ['unix:/run/php/fpm.sock; }', 'unix:/run/php/fpm.sock\n', '127.0.0.1:9000; }', 'unix:relative.sock', '$(id)', '']) {
+  const s = { ...defaultSite('x'), domains: ['ok.test'], php: { enabled: true, endpoint, frontController: true } }
+  check(`fastcgi endpoint rejected: ${JSON.stringify(endpoint)}`, validateSite(s).some(e => e.includes('invalid fastcgi endpoint')), JSON.stringify(validateSite(s)))
+}
+const fpm = e => ({ ...defaultSite('x'), domains: ['ok.test'], php: { enabled: true, endpoint: e, frontController: false } })
+check('a unix socket endpoint is accepted', validateSite(fpm('unix:/run/php/php8.3-fpm.sock')).length === 0, JSON.stringify(validateSite(fpm('unix:/run/php/php8.3-fpm.sock'))))
+check('a host:port endpoint is accepted', validateSite(fpm('127.0.0.1:9000')).length === 0, JSON.stringify(validateSite(fpm('127.0.0.1:9000'))))
+
+const badIndex = { ...defaultSite('x'), domains: ['ok.test'], index: 'index.php; }' }
+check('injection-shaped index rejected', validateSite(badIndex).some(e => e.includes('invalid index entry')), JSON.stringify(validateSite(badIndex)))
+check('empty index rejected', validateSite({ ...defaultSite('x'), domains: ['ok.test'], index: '   ' }).some(e => e.includes('index needs')))
+check('colliding http/https port rejected', validateSite({ ...defaultSite('x'), domains: ['ok.test'], port: 8443, httpsPort: 8443, https: { mode: 'selfsigned' } }).some(e => e.includes('must differ')))
+check('site with no listener rejected', validateSite({ ...defaultSite('x'), domains: ['ok.test'], serveHttp: false, https: { mode: 'none' } }).some(e => e.includes('nothing to serve')))
+const noName = { ...defaultSite('x'), root: '/var/www/x' }
+check('a domainless site is valid and answers to _',
+  validateSite(noName).length === 0 && renderSiteConf(noName).includes('server_name _;'), JSON.stringify(validateSite(noName)))
+
+// the shape this was written for: WordPress behind php-fpm on a non-443 TLS port
+const wp = {
+  ...defaultSite('mixradio'),
+  domains: ['mixviberadio.com'],
+  root: '/var/www/html/mixradio/wordpress',
+  index: 'index.php index.html',
+  httpsPort: 44306,
+  https: { mode: 'selfsigned', forceRedirect: true, manualCert: '', manualKey: '' },
+  listen: { http2: false, http3: true, reuseport: true },
+  php: { enabled: true, endpoint: 'unix:/run/php/php8.3-fpm.sock', frontController: true },
+}
+check('wordpress config validates', validateSite(wp).length === 0, JSON.stringify(validateSite(wp)))
+const wpConf = renderSiteConf(wp)
+check('tls listener on the custom port', wpConf.includes('listen 44306 ssl reuseport;'), wpConf)
+check('quic listener carries reuseport too', wpConf.includes('listen 44306 quic reuseport;'), 'both listeners of one port need it')
+check('alt-svc names the custom port', wpConf.includes(`Alt-Svc 'h3=":44306"`))
+check('redirect names the custom port', wpConf.includes('return 301 https://$host:44306$request_uri;'), 'a bare $host would bounce to a dead 443')
+check('index order is the configured one', wpConf.includes('index index.php index.html;'))
+check('fastcgi block', wpConf.includes('location ~ [^/]\\.php(/|$) {') && wpConf.includes('fastcgi_pass unix:/run/php/php8.3-fpm.sock;'))
+check('the script is checked for existence before fastcgi_pass',
+  wpConf.indexOf('try_files $fastcgi_script_name =404;') < wpConf.indexOf('fastcgi_pass'),
+  'a nonexistent .php path must 404, not reach the interpreter')
+check('front controller is emitted before the php block',
+  wpConf.includes('try_files $uri $uri/ /index.php?$query_string;') && wpConf.indexOf('location / {') < wpConf.indexOf('location ~ [^/]\\.php'))
+check('php block precedes the static-cache regex', wpConf.indexOf('location ~ [^/]\\.php') < wpConf.indexOf('location ~* \\.('), 'regex locations match in order')
+check('dotfiles denied, well-known left open', wpConf.includes('location ~ /\\.(?!well-known) {') && wpConf.includes('deny all;'))
+check('tls session hardening', wpConf.includes('ssl_session_tickets off;') && wpConf.includes('ssl_prefer_server_ciphers off;') && wpConf.includes('shared:dash_ssl'))
+check('nothing hardcodes 443', !/listen 443[ ;]/.test(wpConf), (wpConf.match(/listen[^;]*/g) || []).join(' | '))
+check('tls-only drops the plain-http block', !renderSiteConf({ ...wp, serveHttp: false }).includes('listen 80;'))
+check('front controller yields to a root proxy rule',
+  !renderSiteConf({ ...wp, proxy: [{ path: '/', target: 'http://127.0.0.1:8080' }] }).includes('try_files $uri $uri/ /index.php'),
+  'two location / blocks in one server would fail nginx -t')
+
+// ---- 7c. a manifest written before these fields existed ----
+// The renderer dereferences php/httpsPort/index directly, so readManifest has to fill them in or
+// an upgrade turns every existing site into `listen undefined ssl;`.
+fs.writeFileSync(MANIFEST, JSON.stringify({
+  sites: [{
+    name: 'legacy', domains: ['legacy.test'], root: '/var/www/legacy', port: 80,
+    https: { mode: 'none', forceRedirect: false },
+    listen: { http2: false, http3: false },
+    rateLimit: { enabled: false, rps: 10, burst: 20 },
+    ipRules: { mode: 'none', ips: [] }, basicAuth: { enabled: false, users: [] },
+    gzip: { enabled: true, types: ['text/css'] },
+    staticCache: { enabled: true, extensions: ['css'], expiresDays: 30 },
+  }],
+}))
+const legacy = readManifest().sites[0]
+check('an old manifest is filled in on read', legacy.php?.enabled === false && legacy.httpsPort === 443 && legacy.serveHttp === true && legacy.index === 'index.html index.htm' && legacy.listen.reuseport === false, JSON.stringify(legacy))
+check('an old manifest still renders', renderSiteConf(legacy).includes('listen 80;') && !renderSiteConf(legacy).includes('undefined'), renderSiteConf(legacy))
+fs.writeFileSync(MANIFEST, '{"sites":[]}\n')
 
 // ---- 8. a proxy rule must not drop the docroot ----
 // Emitting only the proxy locations left the site with no `root`, so every other path fell

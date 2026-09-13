@@ -120,6 +120,51 @@ try {
   check('force redirect', conf2.includes('return 301 https://$host$request_uri;'))
   check('selfsigned cert path', conf2.includes('fullchain.pem') && conf2.includes('myapp'), `got: ${conf2.match(/ssl_certificate[^;]*/g)}`)
 
+  // the real-world shape: WordPress behind php-fpm, TLS on a forwarded port
+  const wp = await req('PUT', '/api/sites/myapp', {
+    domains: ['mixviberadio.com'],
+    root: path.join(FIX, 'www', 'myapp'),
+    index: 'index.php index.html',
+    httpsPort: 44306,
+    https: { mode: 'selfsigned', forceRedirect: true },
+    listen: { http2: false, http3: true, reuseport: true },
+    php: { enabled: true, endpoint: 'unix:/run/php/php8.3-fpm.sock', frontController: true },
+    proxy: [],   // the earlier update put a proxy rule on `/`, which outranks the front controller
+  })
+  check('wordpress-shaped site saved', wp.status === 200, JSON.stringify(wp.body))
+  const conf3 = fs.readFileSync(path.join(FIX, 'nginx', 'sites-available', 'myapp.conf'), 'utf8')
+  check('tls on the forwarded port', conf3.includes('listen 44306 ssl reuseport;'))
+  check('quic on the forwarded port', conf3.includes('listen 44306 quic reuseport;'))
+  check('redirect carries the port', conf3.includes('return 301 https://$host:44306$request_uri;'), 'a bare $host would bounce to a dead 443')
+  check('index order', conf3.includes('index index.php index.html;'))
+  check('fastcgi block', conf3.includes('fastcgi_pass unix:/run/php/php8.3-fpm.sock;') && conf3.includes('try_files $fastcgi_script_name =404;'))
+  check('front controller', conf3.includes('try_files $uri $uri/ /index.php?$query_string;'))
+  check('dotfiles denied', conf3.includes('location ~ /\\.(?!well-known) {'))
+  check('no listener left on 443', !/listen 443[ ;]/.test(conf3), (conf3.match(/listen[^;]*/g) || []).join(' | '))
+
+  // rejected shapes never reach the conf
+  check('a colliding http/https port is refused', (await req('PUT', '/api/sites/myapp', { httpsPort: 80 })).status === 400)
+  check('an injection-shaped fpm endpoint is refused', (await req('PUT', '/api/sites/myapp', { php: { enabled: true, endpoint: 'unix:/run/php/x.sock; }' } })).status === 400)
+  check('a site with no listener at all is refused', (await req('PUT', '/api/sites/myapp', { serveHttp: false, https: { mode: 'none' } })).status === 400)
+  check('the conf is untouched after a refusal', fs.readFileSync(path.join(FIX, 'nginx', 'sites-available', 'myapp.conf'), 'utf8') === conf3)
+
+  // last, because it changes the conf: a proxy rule on `/` and the front controller are both
+  // `location /`, and nginx refuses a duplicate — the proxy rule is the one that wins
+  const rootProxy = await req('PUT', '/api/sites/myapp', { proxy: [{ path: '/', target: 'http://127.0.0.1:8080' }] })
+  const conf4 = fs.readFileSync(path.join(FIX, 'nginx', 'sites-available', 'myapp.conf'), 'utf8')
+  check('a root proxy rule outranks the front controller',
+    rootProxy.status === 200 && !conf4.includes('try_files $uri $uri/ /index.php') && conf4.includes('proxy_pass http://127.0.0.1:8080;'),
+    JSON.stringify(rootProxy.body))
+
+  // a vhost with no name yet: serves on its port, answers to anything
+  const catchall = await req('POST', '/api/sites', { name: 'catchall', domains: [], root: path.join(FIX, 'www', 'catchall'), port: 8080 })
+  check('a domainless site is accepted', catchall.status === 200, JSON.stringify(catchall.body))
+  check('...and answers to _',
+    fs.readFileSync(path.join(FIX, 'nginx', 'sites-available', 'catchall.conf'), 'utf8').includes('server_name _;'))
+  check('...and its placeholder is not "undefined"',
+    fs.readFileSync(path.join(FIX, 'www', 'catchall', 'index.html'), 'utf8').includes('<h1>catchall</h1>'))
+  check('cleanup', (await req('DELETE', '/api/sites/catchall')).body.ok === true)
+
   // files: upload + traversal guard + delete
   const fd = new FormData()
   fd.append('files', new Blob(['<h1>hi</h1>']), 'index.html')

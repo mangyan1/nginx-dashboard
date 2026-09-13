@@ -62,6 +62,9 @@ export default function FileManager({ siteName }) {
         {busy && <span>uploading…</span>}
       </div>
       <table>
+        <thead>
+          <tr><th>Name</th><th>Size</th><th>Modified</th><th /></tr>
+        </thead>
         <tbody>
           {entries.map(en => (
             <tr key={en.name}>

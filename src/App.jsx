@@ -6,13 +6,24 @@ import Sites from './components/Sites.jsx'
 import Logs from './components/Logs.jsx'
 import Metrics from './components/Metrics.jsx'
 
-const TABS = ['control', 'sites', 'logs', 'metrics']
+const TABS = [
+  ['control', 'Control'],
+  ['sites', 'Sites'],
+  ['logs', 'Logs'],
+  ['metrics', 'Metrics'],
+]
+
+// index.html already picked a theme before first paint; this only reads it back
+const readTheme = () => (document.documentElement.dataset.theme === 'light' ? 'light' : 'dark')
+// `nginx -v` is the string "nginx version: nginx/1.24.0 (Ubuntu)" — the number is the part worth a cell
+const nginxVer = v => (String(v || '').match(/nginx\/([\d.]+)/) || [])[1] || '—'
 
 export default function App() {
   const [authed, setAuthed] = useState(null) // null = unknown
   const [tab, setTab] = useState(() => location.hash.slice(1) || 'control')
   const [status, setStatus] = useState(null)
   const [dirty, setDirty] = useState(false) // a site form has unsaved edits
+  const [theme, setTheme] = useState(readTheme)
 
   const probe = () => api('GET', '/api/status')
     .then(s => { setStatus(s); setAuthed(true) })
@@ -42,43 +53,67 @@ export default function App() {
     location.hash = t
   }
 
+  const pick = t => {
+    setTheme(t)
+    document.documentElement.dataset.theme = t
+    try { localStorage.setItem('nxd-theme', t) } catch { /* private mode */ }
+  }
+
   if (authed === null) return <div className="loading">…</div>
   if (!authed) return <Login onLogin={probe} />
 
   // in dry mode `active` is already the word "dry", so appending another "(dry)" read "dry (dry)"
   const dry = status?.dry
-  const glyph = dry ? '◌' : status?.active === 'active' ? '●' : '○'
   const state = dry ? 'dry run' : (status?.active || 'unknown')
+  const dot = dry ? 'warn' : status?.active === 'active' ? '' : 'err'
 
   return (
     <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <img src="/favicon.svg" alt="" width="26" height="26" />
-          <span>NGINX <small>dashboard</small></span>
+      <header className="strip">
+        <div className="mark">
+          <img src="/branding/logo-primary.svg" alt="" width="22" height="22" />
+          <b>NXD</b>
+          <span>observe · configure · deploy</span>
         </div>
-        <nav>
-          {TABS.map(t => (
-            <button key={t} className={tab === t ? 'active' : ''} onClick={() => go(t)}>
-              {t[0].toUpperCase() + t.slice(1)}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-foot">
-          <span className={`status ${status?.active}`} title={dry ? 'writes files but never calls nginx' : ''}>
-            {glyph} {state}
-          </span>
-          <button className="logout" onClick={() => api('POST', '/api/logout').then(() => setAuthed(false))}>
-            Sign out
-          </button>
+        <div className="readouts">
+          <div className="readout-cell">
+            <i>state</i>
+            <b className="live"><span className={`dot ${dot}`} />{state}</b>
+          </div>
+          <div className="readout-cell"><i>nginx</i><b>{nginxVer(status?.version)}</b></div>
+          <div className="readout-cell"><i>writes</i><b className={dry ? 'dim' : 'accent'}>{dry ? 'skipped' : 'live'}</b></div>
         </div>
-      </aside>
-      <main>
-        {tab === 'control' && <Control status={status} onStatus={probe} />}
-        {tab === 'sites' && <Sites onDirty={setDirty} />}
-        {tab === 'logs' && <Logs />}
-        {tab === 'metrics' && <Metrics status={status} />}
-      </main>
+        <span className="strip-spacer" />
+        {dry && <span className="tag" title="writes conf files but never calls nginx or systemctl">dry run</span>}
+        <div className="seg" role="group" aria-label="Theme">
+          <button className={theme === 'dark' ? 'on' : ''} onClick={() => pick('dark')}>Dark</button>
+          <button className={theme === 'light' ? 'on' : ''} onClick={() => pick('light')}>Light</button>
+        </div>
+        <button className="ghost" onClick={() => api('POST', '/api/logout').then(() => setAuthed(false))}>Sign out</button>
+      </header>
+
+      <div className="body">
+        <aside className="rail">
+          <nav>
+            {TABS.map(([id, label], i) => (
+              <button key={id} className={`nav-item ${tab === id ? 'on' : ''}`} onClick={() => go(id)}>
+                <i>{String(i + 1).padStart(2, '0')}</i>
+                {label}
+              </button>
+            ))}
+          </nav>
+          <div className="rail-foot">
+            <img src="/branding/logo-primary.svg" alt="" width="20" height="20" />
+            <div className="ver">{status?.version ? nginxVer(status.version) : '—'}</div>
+          </div>
+        </aside>
+        <main className="main">
+          {tab === 'control' && <Control status={status} onStatus={probe} />}
+          {tab === 'sites' && <Sites onDirty={setDirty} />}
+          {tab === 'logs' && <Logs />}
+          {tab === 'metrics' && <Metrics status={status} theme={theme} />}
+        </main>
+      </div>
     </div>
   )
 }

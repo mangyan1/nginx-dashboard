@@ -125,7 +125,7 @@ function findSite(name) {
 
 function sanitizeSite(input, base) {
   const s = { ...base, ...input }
-  for (const k of ['https', 'listen', 'rateLimit', 'ipRules', 'basicAuth', 'gzip', 'staticCache']) {
+  for (const k of ['https', 'listen', 'php', 'rateLimit', 'ipRules', 'basicAuth', 'gzip', 'staticCache']) {
     s[k] = { ...(base?.[k] || defaultSite(s.name)[k]), ...(input?.[k] || {}) }
   }
   s.proxy = Array.isArray(input?.proxy) ? input.proxy : (base?.proxy || [])
@@ -135,6 +135,8 @@ function sanitizeSite(input, base) {
   if (base) s.name = base.name // the URL param names the file; never let the body rename it
   if (typeof s.root !== 'string' || !s.root.trim()) s.root = `/var/www/${s.name}`
   if (typeof s.port !== 'number' || s.port < 1 || s.port > 65535) s.port = 80
+  if (typeof s.httpsPort !== 'number' || s.httpsPort < 1 || s.httpsPort > 65535) s.httpsPort = 443
+  if (typeof s.index !== 'string' || !s.index.trim()) s.index = 'index.html index.htm'
   return s
 }
 
@@ -199,7 +201,7 @@ app.post('/api/sites', async (req, res) => {
   // care whether the docroot exists — only serving it does.
   fs.mkdirSync(site.root, { recursive: true })
   const idx = path.join(site.root, 'index.html')
-  if (!fs.existsSync(idx)) fs.writeFileSync(idx, `<h1>${site.domains[0]}</h1>\n<p>Deployed via nginx-dashboard.</p>\n`)
+  if (!fs.existsSync(idx)) fs.writeFileSync(idx, `<h1>${site.domains[0] || site.name}</h1>\n<p>Deployed via nginx-dashboard.</p>\n`)
 
   res.json({ ok: true, site })
 })

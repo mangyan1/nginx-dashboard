@@ -6,7 +6,7 @@ import FileManager from './FileManager.jsx'
 const GZIP_TYPES = ['text/css', 'application/javascript', 'application/json', 'image/svg+xml', 'text/plain', 'text/xml', 'application/xml']
 const CACHE_EXT = ['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'woff', 'woff2', 'pdf']
 
-const blank = { name: '', domains: '', root: '', port: 80 }
+const PHP_BLANK = { enabled: false, endpoint: '', frontController: false }
 
 export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
   const isNew = !site
@@ -15,8 +15,12 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
     domains: (site?.domains || []).join(', '),
     root: site?.root || '',
     port: site?.port || 80,
+    serveHttp: site?.serveHttp !== false,
+    httpsPort: site?.httpsPort || 443,
+    index: site?.index || 'index.html index.htm',
     https: site?.https || { mode: 'none', forceRedirect: false, manualCert: '', manualKey: '' },
-    listen: site?.listen || { http2: false, http3: false },
+    listen: site?.listen || { http2: false, http3: false, reuseport: false },
+    php: site?.php || PHP_BLANK,
     proxy: site?.proxy ? [...site.proxy] : [],
     upstreams: site?.upstreams ? site.upstreams.map(u => ({ ...u, servers: [...u.servers] })) : [],
     rateLimit: site?.rateLimit || { enabled: false, rps: 10, burst: 20 },
@@ -89,10 +93,21 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
 
   return (
     <div className="site-form">
+      <div className="panel-head formhead">
+        <span className="panel-title">{isNew ? 'New site' : s.name}</span>
+        {!isNew && <>
+          <span className={`chip ${site.enabled ? 'ok' : 'off'}`}>{site.enabled ? 'enabled' : 'disabled'}</span>
+          {site.drift && <span className="chip warn" title={`the conf file on disk is ${site.drift} — saving rewrites it`}>{site.drift}</span>}
+          {!site.managed && <span className="chip un">unmanaged</span>}
+        </>}
+        <span className="spacer" />
+        {dirty && <span className="chip warn">unsaved</span>}
+      </div>
       <Section title="Basics">
         {isNew && <Field label="Name (slug)"><input value={s.name} onChange={e => set({ name: e.target.value })} placeholder="myapp" /></Field>}
-        <Field label="Domains (comma-separated)"><input value={s.domains} onChange={e => set({ domains: e.target.value })} placeholder="myapp.example.com, www.myapp.example.com" /></Field>
+        <Field label="Domains (comma-separated)"><input value={s.domains} onChange={e => set({ domains: e.target.value })} placeholder="myapp.example.com — blank answers to any name on this port" /></Field>
         <Field label="Document root"><input value={s.root} onChange={e => set({ root: e.target.value })} placeholder={`/var/www/${s.name || 'myapp'}`} /></Field>
+        <Field label="Index files (in order)"><input value={s.index} onChange={e => set({ index: e.target.value })} placeholder="index.php index.html" /></Field>
         <Field label="Port (HTTP)"><input type="number" value={s.port} onChange={e => set({ port: Number(e.target.value) })} /></Field>
       </Section>
 
@@ -109,7 +124,9 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
           <Field label="Cert file path"><input value={s.https.manualCert} onChange={e => upS({ manualCert: e.target.value })} placeholder="/etc/ssl/certs/site.pem" /></Field>
           <Field label="Key file path"><input value={s.https.manualKey} onChange={e => upS({ manualKey: e.target.value })} placeholder="/etc/ssl/private/site.key" /></Field>
         </>}
-        <Toggle checked={s.https.forceRedirect} onChange={v => upS({ forceRedirect: v })} label="Force HTTPS redirect (port 80 → 301)" />
+        <Field label="Port (HTTPS)"><input type="number" value={s.httpsPort} onChange={e => set({ httpsPort: Number(e.target.value) })} /></Field>
+        <Toggle checked={s.serveHttp} onChange={v => set({ serveHttp: v })} label="Also serve plain HTTP on the port above" />
+        {s.serveHttp && s.https.mode !== 'none' && <Toggle checked={s.https.forceRedirect} onChange={v => upS({ forceRedirect: v })} label={`Force HTTPS redirect (plain HTTP → 301 on port ${s.httpsPort})`} />}
         <div className="row">
           {!isNew && <>
             <Btn disabled={busy} onClick={selfSigned} title="issue a self-signed cert now — HTTPS works instantly">Issue self-signed</Btn>
@@ -129,6 +146,18 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
         ))}
         <Btn onClick={() => setArr('proxy', [...s.proxy, { path: '/', target: 'http://127.0.0.1:8080', verify: false }])}>+ proxy rule</Btn>
         <p className="hint">Empty proxy list = serve static files from the document root.</p>
+      </Section>
+
+      <Section title="Application backend">
+        <p className="hint">FastCGI covers PHP-FPM and anything else that speaks it — WordPress, AzuraCast, Laravel. A Node, Python or container app is a proxy rule above instead.</p>
+        <Toggle checked={s.php.enabled} onChange={v => set({ enabled: v, endpoint: s.php.endpoint, frontController: s.php.frontController }, 'php')} label="Serve .php through FastCGI" />
+        {s.php.enabled && <>
+          <Field label="FastCGI endpoint">
+            <input value={s.php.endpoint} onChange={e => set({ endpoint: e.target.value }, 'php')} placeholder="unix:/run/php/php8.3-fpm.sock  or  127.0.0.1:9000" />
+          </Field>
+          <Toggle checked={s.php.frontController} onChange={v => set({ frontController: v }, 'php')} label="Front controller — unmatched paths go to /index.php" />
+          <p className="hint">The script file is checked for existence before FastCGI sees it, so a .php path that does not exist is a 404 rather than code handed to the interpreter.</p>
+        </>}
       </Section>
 
       <Section title="Load balancer upstreams">
@@ -214,6 +243,7 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
         </div>}
         <Toggle checked={s.listen.http2} onChange={v => upL({ http2: v })} label="HTTP/2" />
         <Toggle checked={s.listen.http3} onChange={v => upL({ http3: v })} label="HTTP/3 (QUIC — needs nginx ≥ 1.25)" />
+        <Toggle checked={s.listen.reuseport} onChange={v => upL({ reuseport: v })} label="reuseport (one accept queue per worker, on every listener of the port)" />
         <Toggle checked={s.staticCache.enabled} onChange={v => set({ enabled: v, extensions: s.staticCache.extensions, expiresDays: s.staticCache.expiresDays }, 'staticCache')} label="Browser caching for static files" />
         {s.staticCache.enabled && <>
           <Field label={`Expires after: ${s.staticCache.expiresDays} days`}>
@@ -231,15 +261,21 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
         </>}
       </Section>
 
-      <div className="row form-actions">
-        <Btn kind="primary" disabled={busy || !s.domains.trim() || (isNew && !s.name.trim())} onClick={save}>{busy ? '…' : 'Save & apply'}</Btn>
+      {!isNew && site.managed && <FileManager siteName={s.name} />}
+      <Out result={result} />
+
+      <div className="savebar">
+        <Btn kind="primary" disabled={busy || (isNew && !s.name.trim())} onClick={save}>{busy ? '…' : 'Save & apply'}</Btn>
         {!isNew && <>
           <Btn disabled={busy} onClick={() => toggle(site.enabled ? 'disable' : 'enable')}>{site.enabled ? 'Disable' : 'Enable'}</Btn>
           <Btn kind="danger" disabled={busy} onClick={del}>Delete</Btn>
         </>}
+        <span className="spacer" />
+        <span className="note">
+          {result ? (result.ok ? 'applied' : 'rejected — conf rolled back')
+            : dirty ? 'unsaved changes' : 'writes → nginx -t → reload'}
+        </span>
       </div>
-      <Out result={result} />
-      {!isNew && site.managed && <FileManager siteName={s.name} />}
     </div>
   )
 }
