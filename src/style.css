@@ -184,6 +184,12 @@ a { color: var(--accent-ink); }
 .chip.off { color: var(--dimmer); }
 .chip.warn { color: var(--warn-ink); border-color: var(--warn-lo); background: rgba(210, 167, 46, .09); }
 .chip.un { color: var(--dim); border-color: var(--line); border-style: dashed; }
+/* "use default" — the one chip that is a button. It sits on the caption line, in the empty space
+   to the right of the caption, so it can never cover what is being typed in the control below. */
+.chip.def { cursor: pointer; background: transparent; text-transform: none; letter-spacing: .06em; font-size: 9px; padding: 5px 8px; }
+.chip.def:hover:not(:disabled) { color: var(--accent-ink); border-color: var(--accent-lo); background: var(--accent-wash); }
+/* holding the default is the common case, so it reads as the answer to "is this the default?" */
+.chip.def.ok, .chip.def.ok:hover { color: var(--ok); border-color: var(--ok-line); background: var(--ok-bg); cursor: default; }
 
 .banner {
   display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: var(--r);
@@ -212,6 +218,7 @@ a { color: var(--accent-ink); }
 label.btn { position: relative; }
 
 .loading, .hint, .none { color: var(--dim); font: 400 11.5px/1.6 var(--sans); }
+.hint.warn { color: var(--warn-ink); }
 .none { padding: 10px; }
 .err { color: var(--err); }
 
@@ -254,11 +261,18 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-radius
 
 .row { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
 .row input, .row select { flex: 1; }
-.field { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; min-width: 0; }
+/* Caption and its default chip on the first line, control full width on the second. Two rows
+   rather than an overlay, so the chip cannot cover what is typed — and the input stays the first
+   labelable element in the DOM, which is what keeps the label pointing at it. */
+.field { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px 8px; margin: 8px 0; min-width: 0; }
 /* a full-width text box in a 1200px pane is hard to read across; rows stay full width
    because the proxy and upstream editors put several controls on one line */
 .section > .field { max-width: 680px; }
-.field > span { font: 400 9px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--dimmer); }
+.field > span { grid-area: 1 / 1; font: 400 9px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--dimmer); }
+.field > .chip.def { grid-area: 1 / 2; }
+.field > input, .field > select { grid-area: 2 / 1 / 3 / 3; }
+/* in a row or a toggle the chip is one more item to fit, never one to squeeze */
+.toggle > .chip.def, .row > .chip.def { flex: 0 0 auto; }
 .checks { display: flex; flex-wrap: wrap; align-items: center; }
 .checks .toggle span { font-size: 11.5px; color: var(--dim); }
 
@@ -384,6 +398,30 @@ th:last-child, td:last-child { padding-right: 0; }
 .login .mark { border-right: 0; padding-right: 0; }
 .login h1 { font: 600 15px/1.4 var(--sans); }
 .login h1 small { font: 400 10px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dimmer); display: block; padding-top: 7px; }
+
+/* ── snackbars ─────────────────────────────────────────────────────────────── */
+/* Top right, below the strip. The bottom of the pane is where .savebar pins Save and Delete, and a
+   snackbar covering the button it is reporting on is worse than no snackbar at all. */
+.toasts {
+  position: fixed; top: 58px; right: 18px; z-index: 10;
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: min(380px, calc(100vw - 36px));
+}
+.toast {
+  display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: var(--r);
+  border: 1px solid var(--ok-line); background: var(--ok-bg); color: var(--ok);
+  font: 400 11.5px/1.5 var(--mono); box-shadow: 0 10px 26px rgba(0, 0, 0, .3);
+  animation: toast-in .22s cubic-bezier(.22, .7, .3, 1) both;
+}
+.toast.err { border-color: var(--err-lo); background: var(--err-bg); color: var(--err-hi); }
+.toast span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.toast .toast-x {
+  flex: 0 0 auto; border: 0; background: none; padding: 0; cursor: pointer;
+  color: inherit; opacity: .55; font: 400 11px/1 var(--mono);
+}
+.toast .toast-x:hover { opacity: 1; }
+@keyframes toast-in { from { opacity: 0; transform: translateX(14px) } }
+/* .toast's animation is covered by the reduced-motion block below, which switches off all of them */
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important } }
 

@@ -5,6 +5,7 @@ import Control from './components/Control.jsx'
 import Sites from './components/Sites.jsx'
 import Logs from './components/Logs.jsx'
 import Metrics from './components/Metrics.jsx'
+import Toaster from './components/Toaster.jsx'
 
 const TABS = [
   ['control', 'Control'],
@@ -124,6 +125,7 @@ export default function App() {
           {tab === 'metrics' && <Metrics status={status} theme={theme} />}
         </main>
       </div>
+      <Toaster />
     </div>
   )
 }
