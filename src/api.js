@@ -26,6 +26,13 @@ const said = (method, path, data) => {
     if (p[3] === 'files') return method === 'DELETE' ? 'file deleted' : 'file uploaded'
     return method === 'DELETE' ? `site ${site} deleted` : `site ${site} saved and applied`
   }
+  if (p[1] === 'settings') {
+    if (p[2] === '2fa') return p[3] === 'enable' ? 'second factor on' : p[3] === 'disable' ? 'second factor off' : 'second-factor setup started'
+    if (p[2] === 'lockouts') return 'lockouts cleared'
+    if (p[2] === 'history') return 'undo history cleared'
+    if (p[2] === 'new-site-defaults') return 'new-site defaults saved'
+    return ''
+  }
   if (p[1] === 'nginx') return `nginx ${p[2]}`
   if (p[1] === 'logs') return p[2] === 'rotate' ? 'logs rotated' : 'old logs purged'
   if (p[1] === 'cert') return 'certificate requested'

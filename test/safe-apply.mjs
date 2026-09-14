@@ -17,12 +17,12 @@ process.env.DASH_LOG_DIR = path.join(D, 'logs')
 // Read at module load, so it has to be set before the import — and it makes this suite the one
 // place the self-vhost guards are exercised outside a running server.
 process.env.DASH_SELF_NAME = 'nxd'
-const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory } = await import('../lib/nginx.js')
+const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory, clearHistory } = await import('../lib/nginx.js')
 const {
   SELF_NAME, isSelf, defaultSite, renderSiteConf, validateSite, siteConfPath, driftOf, httpConfDrift,
   renderHttpConf, readManifest, parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors,
 } = await import('../lib/manifest.js')
-const { b32encode, b32decode, totp, totpValid, newSecret } = await import('../lib/totp.js')
+const { b32encode, b32decode, totp, totpValid, newSecret, otpauth } = await import('../lib/totp.js')
 
 const realRun = hooks.run
 let failed = 0
@@ -322,6 +322,17 @@ check('retention keeps the newest 20', kept.length === 20, String(kept.length))
 check('retention drops the oldest, not the newest', kept[0].label === 'change 21' && kept.at(-1).label === 'change 2', `${kept[0].label} .. ${kept.at(-1).label}`)
 check('the oldest snapshots are gone from disk', !kept.some(e => e.label === 'change 0' || e.label === 'change 1'))
 
+// ---- 11b. clearing the history ----
+// Every snapshot carries the manifest, and the manifest carries the basic-auth passwords in
+// plaintext — so this is not housekeeping, it is the thing an operator about to hand the box over
+// needs. It also has to survive being asked twice, and being asked when there is nothing there.
+const histPath = path.join(PATHS.stateDir, 'history')
+const beforeClear = listHistory().length
+clearHistory()
+check('clearing the history empties it', beforeClear === 20 && listHistory().length === 0, String(beforeClear))
+check('...taking every file with it', fs.readdirSync(histPath).length === 0, fs.readdirSync(histPath).join(','))
+check('...and clearing nothing is not an error', (clearHistory(), listHistory().length === 0))
+
 // ---- 12. drift: the conf on disk is not the one this manifest generates ----
 // Nothing parses a conf back, so without this a hand-edit is silently overwritten by the next
 // click and the user never learns it happened.
@@ -450,6 +461,13 @@ check('a wrong-length code is rejected, not thrown', !totpValid(SEED, '12345', 5
 check('a malformed secret throws rather than meaning 2FA off', (() => { try { b32decode('not base32!'); return false } catch { return true } })())
 const minted = newSecret()
 check('a generated secret accepts its own code', minted.length === 32 && totpValid(minted, totp(minted)))
+// Pinned character for character: this string is what the QR encodes and what the phone stores. A
+// subtly different one — a missing `issuer`, digits the app defaults differently — enrols a secret
+// that never produces a code this server accepts, and the operator only finds out at the next
+// sign-in, locked out of the page that would fix it.
+check('the otpauth uri is the exact string an authenticator expects',
+  otpauth('JBSWY3DPEHPK3PXP', 'nxd') === 'otpauth://totp/nxd?secret=JBSWY3DPEHPK3PXP&issuer=nxd&algorithm=SHA1&digits=6&period=30',
+  otpauth('JBSWY3DPEHPK3PXP', 'nxd'))
 
 // a revert restores the manifest wholesale, so the snapshot has to be inspected first
 const snap = sites => ({ at: 1, label: 'x', files: [{ path: MANIFEST, content: JSON.stringify({ sites }), link: null }] })

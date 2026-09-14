@@ -5,6 +5,7 @@ import Control from './components/Control.jsx'
 import Sites from './components/Sites.jsx'
 import Logs from './components/Logs.jsx'
 import Metrics from './components/Metrics.jsx'
+import Settings from './components/Settings.jsx'
 import Toaster from './components/Toaster.jsx'
 
 const TABS = [
@@ -12,6 +13,7 @@ const TABS = [
   ['sites', 'Sites'],
   ['logs', 'Logs'],
   ['metrics', 'Metrics'],
+  ['settings', 'Settings'],
 ]
 
 // index.html already picked a theme before first paint; this only reads it back
@@ -123,6 +125,7 @@ export default function App() {
           {tab === 'sites' && <Sites onDirty={setDirty} openSite={openSite} onOpened={() => setOpenSite(null)} />}
           {tab === 'logs' && <Logs />}
           {tab === 'metrics' && <Metrics status={status} theme={theme} />}
+          {tab === 'settings' && <Settings status={status} theme={theme} onTheme={pick} />}
         </main>
       </div>
       <Toaster />

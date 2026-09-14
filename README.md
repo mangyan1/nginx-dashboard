@@ -11,6 +11,15 @@ Runs next to nginx on your Ubuntu/Debian server.
 | **sites** | create / edit / delete / enable / disable server blocks; per-site form covering: reverse-proxy rules, load-balancer upstreams (round robin / least connections / IP hash, http & https backends, passive health checks), **PHP / FastCGI backends**, HTTPS on any port (self-signed / Let's Encrypt / existing certs, force-redirect, TLS-only vhosts, **HSTS**), static sites incl. `.html`-per-page generators, request-body limit, rate limiting, IP allow/deny lists, basic auth, gzip, HTTP/2 & HTTP/3 (+ reuseport), browser caching; built-in file manager with multi-upload and **deploy-folder-as-zip** |
 | **logs** | live tail of access.log & error.log (SSE), rotate, purge old rotated logs |
 | **metrics** | stub_status stats + live active-connections chart |
+| **settings** | the second factor (enrol, or turn off with the password), sign-in lockouts and clearing them, what a new site is created from, undo-history maintenance, dark/light, a dependency-version check, and a read-only view of where this install lives |
+
+Every editable control in the site form carries a **use default** chip naming the
+value the server would apply if the field were left alone. Clicking it writes that
+value; the chip greys out and reads "this is the default" when the field already
+holds it, so the same chip answers *what is the default* and *is this it*. The
+values come from `GET /api/site-defaults`, not from a copy in the browser, so the
+chip cannot drift from the conf. A save that produces a warning or a refusal says
+so in a snackbar as well as in the panel — the panel scrolls, the snackbar does not.
 
 The interface is a dark instrument panel in the NXD palette, with every number
 set in IBM Plex Mono. Archivo and IBM Plex Mono come from Google Fonts, so on a
@@ -23,6 +32,21 @@ layout does not depend on them.
   (`/var/lib/nginx-dashboard/manifest.json`) and its `.conf` is **generated**
   from it — never parsed back. Foreign sites in `sites-available` are listed
   read-only.
+- The dashboard's own settings live beside it in `settings.json` (mode 0600):
+  the second-factor secret and what a new site is created from. Kept out of the
+  manifest on purpose — the undo history restores whole site objects, and a
+  revert must not be able to drop a second factor.
+- New sites start from a hardened base: rate limiting on at 50 r/s with a burst
+  of 100, HSTS **off** (it is a one-way door, and defaulting it on would arm
+  itself the moment a new site is pointed at a self-signed certificate). The
+  whole base is visible in the site form through the **use default** chips, and
+  editable in Settings → *New-site defaults*. Overrides apply **only when a site
+  is created**, so changing one can never reinterpret a vhost that is already
+  serving traffic. Upgrading is likewise a no-op for sites this dashboard already
+  manages: their values are stored in the manifest and are what get rendered. The
+  one thing that can change is a hand-written manifest entry that omits a field
+  altogether — the read side fills the gap, which shows up as a red **drift** chip
+  on that site the next time you open it.
 - Every change goes through one pipeline: write file → `nginx -t` →
   on failure restore the previous file byte-for-byte and show the error →
   on success `nginx -s reload`. A config nginx rejects can never reach nginx.
@@ -96,8 +120,13 @@ proxy rule wins and the fallback stands down.
   `Secure` once the request arrives over TLS.
 - Login is throttled: five failures from one address lock it out for fifteen
   minutes (`429` + `Retry-After`). In memory, so restarting the service clears it.
-- Optional TOTP second factor (`DASH_TOTP_SECRET`, off by default). Generate one
-  with `npm run totp:new` on the server and paste the line it prints into the unit.
+- Optional TOTP second factor, off by default. Enrol it in the UI — Settings →
+  **Set up the second factor** shows a QR and the same secret as a key, and the
+  secret is written only once a code from the phone has been accepted, so a
+  mistyped one cannot lock you out. `npm run totp:new` plus a line in the unit
+  still works and still wins: `DASH_TOTP_SECRET` outranks anything saved in the
+  panel, and while it is set the panel says so instead of offering controls that
+  would be ignored.
 - Binds to `127.0.0.1:7412` — reach it via SSH tunnel, or publish its own vhost.
 - Anyone with the password effectively has root: keep it strong.
 
@@ -141,9 +170,11 @@ browser, not the tool:
 ssh -N -L 7412:127.0.0.1:7412 user@server   # then open http://localhost:7412
 ```
 
-Lost the phone with the authenticator? Remove `DASH_TOTP_SECRET` from
+Lost the phone with the authenticator? Settings → **Turn the second factor off**
+asks for the password and nothing else, so this needs no SSH. If the factor is
+owned by the unit instead, remove `DASH_TOTP_SECRET` from
 `/etc/systemd/system/nginx-dashboard.service`, `systemctl daemon-reload &&
-systemctl restart nginx-dashboard`. Login falls back to password only.
+systemctl restart nginx-dashboard`; login falls back to password only.
 
 Locked out by the vhost's allowlist or a bad `listen`? The same route works. Fix it in
 the UI over the tunnel — over the tunnel `req.ip` is loopback, so the allowlist cannot

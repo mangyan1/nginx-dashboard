@@ -34,11 +34,20 @@ Everything is set in the systemd unit. The installer carries an existing
 | `DASH_HOST` / `DASH_PORT` | `127.0.0.1` / `7412` | what the dashboard itself binds |
 | `DASH_SELF_NAME` | `nxd` | name of the dashboard's own managed vhost; unset pins nothing |
 | `DASH_MAX_UPLOAD_MB` | `2048` | upload cap for the file manager, and the default for the self vhost's `client_max_body_size` |
-| `DASH_TOTP_SECRET` | unset | base32 TOTP secret; unset = password only |
+| `DASH_TOTP_SECRET` | unset | base32 TOTP secret. Unset = the second factor is managed from Settings; set = required at login, and the Settings controls are disabled rather than ignored |
 | `DASH_DRY` | unset | `1` writes config but skips `nginx -t`, reloads and certbot |
 
+The second factor is normally enrolled in the UI: Settings → **Set up the second
+factor** shows a QR (and the same secret as a key and an `otpauth://` URL) and
+writes the secret only after a code from the phone is accepted. It is stored in
+`/var/lib/nginx-dashboard/settings.json`, mode 0600, and deliberately not in the
+manifest — history snapshots restore whole site objects, and a revert would
+otherwise be able to drop it.
+
 `npm run totp:new` on the server prints a fresh secret, the `otpauth://` URI to
-scan, and the exact `Environment=` line to paste into the unit.
+scan, and the exact `Environment=` line to paste into the unit. Both routes work,
+and this one wins: it is what the installer carries across a re-run, and it keeps
+a unit-owned factor out of reach of the panel.
 
 ## Access
 
@@ -73,7 +82,9 @@ saved settings, so the next save discards the edit. Change the settings in the U
 instead. The one exception is `sites-enabled`: removing the symlink *is* how you
 unpublish it, and a vhost with no entry left is never resurrected.
 
-- **Lost the authenticator:** delete the `DASH_TOTP_SECRET` line from the unit,
+- **Lost the authenticator:** Settings → **Turn the second factor off** — the
+  password alone, no code, so this needs no SSH. If the unit owns it instead,
+  delete the `DASH_TOTP_SECRET` line and
   `systemctl daemon-reload && systemctl restart nginx-dashboard`.
 - **Locked out by the allowlist or a bad `listen`:** the tunnel is unaffected —
   `req.ip` is loopback there, and nothing in the dashboard's own bind changes.

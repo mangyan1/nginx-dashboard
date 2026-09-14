@@ -7,14 +7,14 @@ import multer from 'multer'
 import { spawn } from 'node:child_process' // tail -F for SSE; args are a fixed array, never user strings
 import {
   PATHS, MANIFEST, HTTP_CONF, mkdirs, validName, safeJoin, safeApply,
-  nginxTest, systemctl, shell, listHistory, revertHistory, readHistoryEntry,
+  nginxTest, systemctl, shell, listHistory, clearHistory, revertHistory, readHistoryEntry,
 } from './lib/nginx.js'
 import {
   SELF_NAME, isSelf, defaultSite, readManifest, writeManifest, siteConfPath, enabledConfPath, certDir,
   renderHttpConf, renderSiteConf, writeHtpasswd, validateSite, driftOf, httpConfDrift,
   parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors,
 } from './lib/manifest.js'
-import { b32decode, totpValid } from './lib/totp.js'
+import { b32decode, newSecret, otpauth, totpValid } from './lib/totp.js'
 
 // Number(), not the raw string: every comparison against this port is numeric, and a string
 // would make each one false — the self-vhost check included.
@@ -22,8 +22,35 @@ const PORT = Number(process.env.DASH_PORT) || 7412
 const HOST = process.env.DASH_HOST || '127.0.0.1'
 const PASSWORD = process.env.DASH_PASSWORD
 const DRY = process.env.DASH_DRY === '1' // dev mode: write files, skip nginx -t / reload / systemctl / certbot
-const TOTP_SECRET = process.env.DASH_TOTP_SECRET || ''
 const MAX_UPLOAD_MB = Number(process.env.DASH_MAX_UPLOAD_MB) || 2048
+
+// ---------- settings ----------
+// The only file here that can hold a secret (the second-factor secret). 0600, and written
+// tmp-then-rename, so a crash mid-write cannot leave a truncated file that reads as "no second
+// factor". Deliberately not in the manifest: history snapshots restore whole site objects, and a
+// reverted snapshot could resurrect or drop a second factor — the same reasoning that made `self`
+// derived rather than stored.
+const SETTINGS = path.join(PATHS.stateDir, 'settings.json')
+
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(SETTINGS, 'utf8')) } catch { return {} }
+}
+
+function writeSettings(next) {
+  const tmp = `${SETTINGS}.tmp`
+  fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
+  fs.renameSync(tmp, SETTINGS)
+  // `mode` on writeFileSync only applies when the file is created, and a tmp left behind by a crash
+  // would carry whatever mode it had. This is the one file here that holds a secret, so it is stated
+  // rather than assumed.
+  fs.chmodSync(SETTINGS, 0o600)
+}
+
+// The env var outranks the file, so install.sh's carry-over and the documented SSH recovery both
+// keep working untouched. When it owns the secret the settings routes refuse rather than offering a
+// control that would be ignored on the next restart.
+const TOTP_FROM_ENV = !!process.env.DASH_TOTP_SECRET
+let TOTP_SECRET = process.env.DASH_TOTP_SECRET || readSettings().totpSecret || ''
 
 if (!PASSWORD) {
   console.error('Set DASH_PASSWORD env var before starting.')
@@ -86,8 +113,25 @@ function authed(req) {
 function requireAuth(req, res, next) {
   if (!authed(req)) return res.status(401).json({ error: 'unauthorized' })
   res.set('Cache-Control', 'no-store') // config state must never come from browser cache
+  // The session token, so a pending second-factor enrolment can be keyed to the session that began
+  // it rather than to a slot any signed-in caller could overwrite.
+  req.sid = parseCookies(req)[COOKIE]
   next()
 }
+
+// sha256 both sides, then timingSafeEqual: the digests are fixed-width, so it cannot throw on
+// length the way a raw comparison would, and it does not leak how much of the password matched.
+function passwordOk(given) {
+  const a = crypto.createHash('sha256').update(String(given || '')).digest()
+  const b = crypto.createHash('sha256').update(PASSWORD).digest()
+  return crypto.timingSafeEqual(a, b)
+}
+
+// A half-enrolled second factor is a second factor that is not yet real, so it is held in memory
+// keyed by the session that began it and never reaches disk. Keyed by session rather than by a
+// single slot, so one operator mid-enrolment cannot overwrite another's.
+const PENDING_2FA = new Map()
+const PENDING_TTL = 10 * 60_000
 
 // Secure only when the request actually arrived over TLS. Setting it unconditionally would break
 // the plain-HTTP SSH tunnel — which is the documented way back in when the vhost is broken, so
@@ -129,9 +173,7 @@ app.post('/api/login', (req, res) => {
     res.setHeader('Retry-After', String(wait))
     return res.status(429).json({ error: `too many failed logins — try again in ${Math.ceil(wait / 60)} min` })
   }
-  const given = crypto.createHash('sha256').update(String(req.body?.password || '')).digest()
-  const stored = crypto.createHash('sha256').update(PASSWORD).digest()
-  const pwOk = crypto.timingSafeEqual(given, stored) // both fixed-width digests, so equal length
+  const pwOk = passwordOk(req.body?.password)
   // Checked after the password, never before: an unauthenticated caller must not get an oracle
   // that tells them whether a guessed code was right.
   const codeOk = !TOTP_SECRET || totpValid(TOTP_SECRET, req.body?.code)
@@ -244,7 +286,7 @@ app.get('/api/status', async (req, res) => {
 app.get('/api/site-defaults', (req, res) => {
   const name = String(req.query.name || '')
   if (name && !validName(name)) return res.status(400).json({ error: 'invalid name' })
-  res.json({ defaults: defaultSite(name) })
+  res.json({ defaults: defaultSite(name), create: createDefaults(name) })
 })
 
 app.post('/api/nginx/:action', async (req, res) => {
@@ -325,6 +367,52 @@ function writeSiteFiles(site, m) {
   fs.writeFileSync(HTTP_CONF, renderHttpConf(m.sites))
 }
 
+// Deep-merged one level, the same shape sanitizeSite builds, so an override like
+// {"gzip":{"enabled":false}} cannot drop the types that live beside it.
+const NESTED_KEYS = ['https', 'hsts', 'listen', 'php', 'rateLimit', 'ipRules', 'basicAuth', 'gzip', 'staticCache']
+
+/**
+ * The site factory with the operator's own preferences laid over it. Applied **only when a site is
+ * created**: `normalizeSite` keeps filling gaps from `defaultSite`, so changing a preference here
+ * can never retroactively reinterpret a site that already exists and is already serving traffic.
+ * Deep-merged one level, the same shape sanitizeSite builds, so an override like
+ * `{"gzip":{"enabled":false}}` cannot drop the types that live beside it.
+ */
+function createDefaults(name, o = readSettings().newSiteDefaults || {}) {
+  const d = defaultSite(name)
+  const s = { ...d, ...o, name }
+  for (const k of NESTED_KEYS) s[k] = { ...d[k], ...(o[k] || {}) }
+  return s
+}
+
+/**
+ * Checks a partial site before it is allowed to become a default. Two questions, and the first is
+ * the one that matters: is every key a real field? A typo'd key is accepted by every structural
+ * check there is and then silently does nothing — the exact "reads ON while the conf emits nothing"
+ * failure this whole pass exists to close. The second is the renderer's own validator, run against
+ * the assembled site, so a value that passes here is one that can be written to a conf.
+ */
+function overlayErrors(o) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return ['must be a JSON object']
+  const def = defaultSite('example')
+  const errs = []
+  for (const [k, v] of Object.entries(o)) {
+    if (k === 'name' || k === 'self' || !(k in def)) { errs.push(`not a site field: ${k}`); continue }
+    const dv = def[k]
+    if (Array.isArray(dv)) {
+      if (!Array.isArray(v)) errs.push(`${k} must be a list`)
+    } else if (dv && typeof dv === 'object') {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) { errs.push(`${k} must be an object`); continue }
+      for (const [k2, v2] of Object.entries(v)) {
+        if (!(k2 in dv)) errs.push(`not a ${k} field: ${k2}`)
+        else if (typeof v2 !== typeof dv[k2]) errs.push(`${k}.${k2} must be a ${typeof dv[k2]}`)
+      }
+    } else if (typeof v !== typeof dv) errs.push(`${k} must be a ${typeof dv}`)
+  }
+  if (!errs.length) errs.push(...validateSite(createDefaults('example', o)))
+  return errs
+}
+
 // MANIFEST belongs in the transaction: it is written inside mutate(), so leaving it out of
 // `files` means a failed nginx -t rolls the conf back while the manifest keeps the change.
 const siteFiles = name => [siteConfPath(name), HTTP_CONF, MANIFEST]
@@ -377,7 +465,10 @@ app.post('/api/sites', async (req, res) => {
   if (!validName(name)) return res.status(400).json({ error: 'invalid site name' })
   const m = readManifest()
   if (m.sites.some(s => s.name === name)) return res.status(409).json({ error: 'site exists' })
-  const site = sanitizeSite({ ...req.body, name })
+  // Under the body, so an unmentioned field lands on the operator's own preference and not on the
+  // built-in. The form always sends every field, so this decides only what a blank one means — and
+  // it is the same object the form seeds from, which is what keeps a blank from meaning two things.
+  const site = sanitizeSite({ ...createDefaults(name), ...req.body, name })
 
   const errs = validateSite(site)
   // `enabled` deliberately not passed: every site is created disabled, so requiring the self
@@ -718,6 +809,138 @@ app.get('/api/metrics', async (req, res) => {
   } catch {
     res.status(503).json({ error: 'stub_status unreachable — is nginx running with the module loaded?' })
   }
+})
+
+// ---------- module 7: settings ----------
+/** Where the second factor currently comes from, so the panel can say why a control is inert. */
+const totpState = () => ({
+  enabled: !!TOTP_SECRET,
+  source: TOTP_FROM_ENV ? 'env' : (TOTP_SECRET ? 'file' : 'off'),
+})
+
+app.get('/api/settings', (req, res) => {
+  res.json({
+    totp: totpState(),
+    newSiteDefaults: readSettings().newSiteDefaults || {},
+    // read-only, and shown so the numbers behind a lockout are not folklore
+    lockout: { max: FAIL_MAX, windowMin: FAIL_WINDOW / 60_000, lockMin: LOCK_FOR / 60_000 },
+    // Never the addresses themselves beyond what the operator typed to get here — this is the list
+    // they need to see to understand why they are locked out, and it is in memory by design.
+    locked: [...FAILS.entries()].filter(([, f]) => f.until > Date.now()).map(([ip, f]) => ({ ip, until: f.until })),
+    env: {
+      host: HOST, port: PORT, dry: DRY, selfName: SELF_NAME,
+      maxUploadMB: MAX_UPLOAD_MB, manifest: MANIFEST, settings: SETTINGS, stateDir: PATHS.stateDir,
+      node: process.version,
+    },
+  })
+})
+
+// `code` is the code from the authenticator, not the password: enrolment is the one thing an
+// already-signed-in operator does not have to re-prove a password for, because they had to give it
+// to get the session. Disabling is the opposite — see below.
+app.post('/api/settings/2fa/begin', (req, res) => {
+  if (TOTP_FROM_ENV) return res.status(409).json({ error: 'the second factor is set by DASH_TOTP_SECRET in the service unit — remove that line and restart to manage it here' })
+  const secret = newSecret()
+  PENDING_2FA.set(req.sid, { secret, expires: Date.now() + PENDING_TTL })
+  res.json({ secret, uri: otpauth(secret, SELF_NAME || 'nginx-dashboard'), expiresInSec: PENDING_TTL / 1000 })
+})
+
+app.post('/api/settings/2fa/enable', (req, res) => {
+  if (TOTP_FROM_ENV) return res.status(409).json({ error: 'the second factor is set by DASH_TOTP_SECRET in the service unit' })
+  const p = PENDING_2FA.get(req.sid)
+  if (!p || p.expires < Date.now()) {
+    PENDING_2FA.delete(req.sid)
+    return res.status(400).json({ error: 'no enrolment in progress — start again, the secret is only held for ten minutes' })
+  }
+  // Verified before it is written: storing a secret whose code has never worked would lock the
+  // operator out on the next sign-in, with no way back in but SSH.
+  if (!totpValid(p.secret, req.body?.code)) {
+    return res.status(400).json({ error: 'that code does not match — check the clock on the phone and try the current one' })
+  }
+  writeSettings({ ...readSettings(), totpSecret: p.secret })
+  TOTP_SECRET = p.secret
+  PENDING_2FA.delete(req.sid)
+  res.json({ ok: true })
+})
+
+// Password only, and no code: a lost phone has to be recoverable from the UI, and the password is
+// the thing the operator still has. Same check the login route makes, so there is one answer to
+// "is this the password" rather than two that can disagree.
+app.post('/api/settings/2fa/disable', (req, res) => {
+  if (TOTP_FROM_ENV) return res.status(409).json({ error: 'the second factor is set by DASH_TOTP_SECRET in the service unit — the panel cannot turn it off' })
+  // 403, not 401: the caller is signed in and this is the password being refused, and a 401 is what
+  // the client reads as "your session ended" — it would sign the operator out over a typo in a field
+  // on a page they were already using.
+  if (!passwordOk(req.body?.password)) return res.status(403).json({ error: 'wrong password' })
+  const s = readSettings()
+  delete s.totpSecret
+  writeSettings(s)
+  TOTP_SECRET = ''
+  // An enrolment still in progress belongs to a factor that no longer exists, so it goes too —
+  // otherwise a code typed at a stale QR turns the second factor back on just after it was turned
+  // off. Expired entries need no sweep of their own: `begin` overwrites and `enable` checks the
+  // deadline when it reads.
+  PENDING_2FA.delete(req.sid)
+  res.json({ ok: true })
+})
+
+app.post('/api/settings/lockouts/clear', (req, res) => {
+  const n = FAILS.size
+  FAILS.clear()
+  res.json({ ok: true, output: `${n} address${n === 1 ? '' : 'es'} unlocked` })
+})
+
+// The undo history is bounded at twenty snapshots already, so this is not housekeeping — it is for
+// the case where the snapshots themselves are the problem: each one carries the manifest with its
+// basic-auth passwords, and an operator about to hand the box over may want them gone.
+app.delete('/api/settings/history', async (req, res) => {
+  const n = listHistory().length
+  clearHistory()
+  res.json({ ok: true, output: `${n} snapshot${n === 1 ? '' : 's'} removed` })
+})
+
+app.put('/api/settings/new-site-defaults', (req, res) => {
+  const o = req.body?.defaults
+  const errs = overlayErrors(o)
+  if (errs.length) return res.status(400).json({ error: errs.join('; ') })
+  writeSettings({ ...readSettings(), newSiteDefaults: o })
+  res.json({ ok: true, defaults: o })
+})
+
+// The seven dependencies, asked one at a time with a short timeout. Node 22's global fetch, so no
+// new runtime dependency — and nothing about this install is sent beyond a package name. A host
+// with no outbound internet gets a sentence, not a broken tab.
+const DEP_NAMES = () => {
+  try {
+    const p = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+    return Object.keys({ ...p.dependencies, ...p.devDependencies })
+  } catch { return [] }
+}
+
+// What is on disk, not the range package.json asks for. `^5.2.1` compared against a registry
+// version is not a comparison at all — every package then reads as behind for ever, which is how a
+// button reporting "8 of 8" teaches the operator to stop reading it. Blank means the package is not
+// installed here, which is the honest answer for a devDependency on a server that ran
+// `npm ci --omit=dev`: it is not part of that install and never updates there.
+const installedVersion = name => {
+  try {
+    return JSON.parse(fs.readFileSync(new URL(`./node_modules/${name}/package.json`, import.meta.url), 'utf8')).version || ''
+  } catch { return '' }
+}
+
+app.get('/api/settings/updates', async (req, res) => {
+  const out = await Promise.all(DEP_NAMES().map(async name => {
+    const installed = installedVersion(name)
+    try {
+      const r = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}/latest`, { signal: AbortSignal.timeout(8000) })
+      if (!r.ok) return { name, installed, latest: '', error: `registry answered ${r.status}` }
+      const { version } = await r.json()
+      return { name, installed, latest: version || '' }
+    } catch (e) {
+      return { name, installed, latest: '', error: e.name === 'TimeoutError' ? 'timed out' : e.message }
+    }
+  }))
+  res.json({ packages: out, reachable: out.some(p => p.latest) })
 })
 
 // static frontend shell is not secret (all server data flows through the guarded /api);

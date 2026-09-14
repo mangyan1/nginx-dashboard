@@ -117,6 +117,22 @@ try {
   check('...and over IPv6', servedV6, JSON.stringify(viaNginx('myapp.test', '/', 6).slice(0, 80)))
   check('proxy rule reached the conf', read(path.join(AVAIL, 'myapp.conf'))?.includes('proxy_pass http://myapp_pool;'))
 
+  // The hardened base every new site is created from, checked against what REAL nginx accepted
+  // rather than against the factory that wrote it: `limit_req_zone` is http-context-only, so a
+  // wrong zone name or a rate nginx dislikes is not a diff, it is a failed `nginx -t` — which the
+  // create above would have surfaced as a 422. What this pins is that the default is not inert.
+  check('a site created with only a name gets the default rate limit',
+    read(path.join(AVAIL, 'myapp.conf'))?.includes('limit_req zone=myapp_rl burst=100 nodelay;'),
+    read(path.join(AVAIL, 'myapp.conf'))?.split('\n').filter(l => l.includes('limit_req')).join('|'))
+  check('...whose zone nginx accepted at 50 r/s',
+    read('/etc/nginx/conf.d/00-dashboard.conf')?.includes('zone=myapp_rl:10m rate=50r/s'))
+  // And that the chip the form shows comes from the same place as the conf, not a copy of it.
+  const defs = await req('GET', '/api/site-defaults?name=chipcheck')
+  check('the site-defaults the form renders say the same thing',
+    defs.status === 200 && defs.body.create.rateLimit.rps === 50 && defs.body.create.rateLimit.burst === 100 &&
+    defs.body.create.gzip.types.length === defs.body.defaults.gzip.types.length,
+    JSON.stringify(defs.body.create?.rateLimit))
+
   // A live master is what makes this suite worth running, and the failure that motivated it
   // (a second master holding :80 while the pid file points elsewhere) is invisible from the
   // API — every call answers 200. Assert the precondition directly.

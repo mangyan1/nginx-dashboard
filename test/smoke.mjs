@@ -5,6 +5,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+const { totp, newSecret } = await import('../lib/totp.js')
+
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const FIX = path.join(root, 'test', 'fixtures')
 const API = 'http://127.0.0.1:3123'
@@ -396,6 +398,138 @@ try {
     !!(await req('GET', '/api/sites')).body.sites.find(s => s.name === 'nxd' && !s.managed))
   check('...so repair has nothing to write it from', (await req('POST', '/api/sites/nxd/repair')).status === 404)
   fs.writeFileSync(mPath, JSON.stringify(mLive))
+
+  // ---- the settings file, the new-site defaults, and the second factor ----
+  // All of it last, because the overlay below is applied to every site created after it is saved.
+
+  // What a new site is created from. `defaults` is the factory, `create` is that factory with the
+  // operator's overlay on it — and the two differ only once something has been saved.
+  const cd = await req('GET', '/api/site-defaults?name=fresh')
+  check('site-defaults hands back what a new site is created from',
+    cd.body.create?.rateLimit?.rps === 50 && cd.body.create.root === '/var/www/fresh' && cd.body.create.name === 'fresh',
+    JSON.stringify(cd.body?.create?.rateLimit))
+
+  const settingsPath = path.join(FIX, 'state', 'settings.json')
+  const saveDefaults = d => req('PUT', '/api/settings/new-site-defaults', { defaults: d })
+
+  // A typo'd key is the dangerous shape: it reads as a setting that was saved and does nothing,
+  // which is how a toggle ends up on screen while the conf emits no directive for it.
+  check('a misspelled key in the new-site defaults is refused, and named',
+    (await saveDefaults({ gzipp: { enabled: false } })).body.error === 'not a site field: gzipp')
+  check('a nested key of the wrong type is refused',
+    (await saveDefaults({ gzip: { enabled: 'yes' } })).body.error === 'gzip.enabled must be a boolean')
+  check('...and `name` cannot be made a default, which would rename every new site',
+    (await saveDefaults({ name: 'evil' })).body.error === 'not a site field: name')
+  check('the refusals wrote nothing', !fs.existsSync(settingsPath) || !JSON.parse(fs.readFileSync(settingsPath, 'utf8')).newSiteDefaults)
+
+  check('a valid overlay is saved', (await saveDefaults({ rateLimit: { rps: 80, burst: 150 }, gzip: { enabled: true } })).status === 200)
+  const withOverlay = (await req('GET', '/api/site-defaults?name=fresh')).body.create
+  check('...and it is what the chip would read',
+    withOverlay.rateLimit.rps === 80 && withOverlay.rateLimit.burst === 150 && withOverlay.gzip.enabled === true)
+  // Measured against the factory rather than against a count written here: the overlay is merged
+  // one level deep, and a list living beside the key that was set is exactly what a shallow merge
+  // would drop. Comparing the two lists is the invariant; a magic number would just need editing
+  // the next time a MIME type is added.
+  check('...without disturbing the fields it did not mention',
+    withOverlay.rateLimit.enabled === true &&
+    JSON.stringify(withOverlay.gzip.types) === JSON.stringify(cd.body.defaults.gzip.types),
+    JSON.stringify(withOverlay.gzip.types))
+
+  const fromOverlay = await req('POST', '/api/sites', { name: 'overlaid', domains: ['overlaid.test'], root: path.join(FIX, 'www', 'overlaid') })
+  check('a new site is created from the overlay',
+    fromOverlay.body.site?.rateLimit?.rps === 80 && fromOverlay.body.site.rateLimit.burst === 150, JSON.stringify(fromOverlay.body.site?.rateLimit))
+  check('...and it reaches the conf',
+    fs.readFileSync(path.join(FIX, 'nginx', 'conf.d', '00-dashboard.conf'), 'utf8').includes('zone=overlaid_rl:10m rate=80r/s'))
+
+  // The point of applying it only on create. Saving an existing site must not reinterpret what it
+  // already is, or changing a default would silently rewrite every vhost on the box.
+  const before = (await req('GET', '/api/sites/overlaid')).body.site
+  await saveDefaults({ rateLimit: { rps: 10, burst: 20 } })
+  const after = await req('PUT', '/api/sites/overlaid', { domains: ['overlaid.test'] })
+  check('an existing site keeps its own values when the default changes',
+    after.body.site?.rateLimit?.rps === before.rateLimit.rps, `${before.rateLimit.rps} -> ${after.body.site?.rateLimit?.rps}`)
+  check('...even though it was saved after the change', after.status === 200)
+  check('cleanup', (await req('DELETE', '/api/sites/overlaid')).body.ok === true)
+
+  check('a bad overlay is a 400, not a 500', (await saveDefaults(['not', 'an', 'object'])).status === 400)
+  check('clearing the overlay puts the factory back', (await saveDefaults({})).status === 200 &&
+    (await req('GET', '/api/site-defaults?name=fresh')).body.create.rateLimit.rps === 50)
+
+  // The secret is the one thing in this file worth protecting, and it is written tmp-then-rename
+  // then chmod'd, so the assertion is about the file that ends up in place, not the one created.
+  check('the settings file is not readable by anyone but its owner',
+    process.platform === 'win32' || (fs.statSync(settingsPath).mode & 0o777) === 0o600,
+    (fs.statSync(settingsPath).mode & 0o777).toString(8))
+
+  // The second factor, end to end: enrolled from a code, demanded at the door, and removable
+  // without one — because a lost phone has to be recoverable from the page that turned it on.
+  const begun = await req('POST', '/api/settings/2fa/begin')
+  check('enrolment hands back a secret and a uri', begun.body.secret?.length === 32 && begun.body.uri.startsWith('otpauth://totp/nxd?secret='), JSON.stringify(begun.body?.uri))
+  check('...and nothing is written until a code proves it', !JSON.parse(fs.readFileSync(settingsPath, 'utf8')).totpSecret)
+  check('a code that does not match is refused', (await req('POST', '/api/settings/2fa/enable', { code: '000000' })).status === 400)
+  check('an enable with no enrolment in progress is refused',
+    (await req('POST', '/api/settings/2fa/enable', { code: totp(newSecret()) })).status === 400)
+  const reBegun = await req('POST', '/api/settings/2fa/begin')
+  check('turning it on takes a code from the secret it just showed',
+    (await req('POST', '/api/settings/2fa/enable', { code: totp(reBegun.body.secret) })).body.ok === true)
+  check('...and now it is on disk', JSON.parse(fs.readFileSync(settingsPath, 'utf8')).totpSecret === reBegun.body.secret)
+  check('...and reported as on, from this dashboard',
+    (await req('GET', '/api/settings')).body.totp.source === 'file')
+
+  // The session cookie is already held, so this is the door rather than the room: a fresh login
+  // without a code must fail, and the same one with a code must pass.
+  const kept = cookie
+  cookie = ''
+  check('the password alone is no longer enough', (await req('POST', '/api/login', { password: 'testpw' })).status === 401)
+  check('...and the refusal says which half was wrong',
+    (await req('POST', '/api/login', { password: 'testpw' })).body.error === 'wrong code')
+  check('the password and a code let the operator in',
+    (await req('POST', '/api/login', { password: 'testpw', code: totp(reBegun.body.secret) })).body.ok === true)
+  check('...while a wrong password is still a wrong password',
+    (await req('POST', '/api/login', { password: 'nope', code: totp(reBegun.body.secret) })).body.error === 'wrong password')
+  cookie = kept
+
+  check('turning it off needs the password and refuses the wrong one',
+    (await req('POST', '/api/settings/2fa/disable', { password: 'nope' })).status === 403)
+  check('...and with it, turns it off', (await req('POST', '/api/settings/2fa/disable', { password: 'testpw' })).body.ok === true)
+  check('...removing the secret from disk', !JSON.parse(fs.readFileSync(settingsPath, 'utf8')).totpSecret)
+  check('cleanup: the password alone works again',
+    (await req('POST', '/api/login', { password: 'testpw' })).body.ok === true)
+
+  // The env var outranks the file, so an install that has always carried its secret in the unit
+  // file is untouched — including the panel, which refuses rather than offering a control that the
+  // next restart would ignore.
+  const envSecret = newSecret()
+  const envPort = '3124'
+  const second = spawn(process.execPath, [path.join(root, 'server.js')], {
+    env: { ...env, DASH_PORT: envPort, DASH_STATE_DIR: path.join(FIX, 'state-env'), DASH_TOTP_SECRET: envSecret },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  try {
+    await new Promise(r => { second.stdout.on('data', d => String(d).includes(envPort) && r()); setTimeout(r, 3000) })
+    let envCookie = ''
+    const envReq = async (method, p, body) => {
+      const opts = { method, headers: { ...(envCookie ? { cookie: envCookie } : {}) } }
+      if (body !== undefined) { opts.headers['content-type'] = 'application/json'; opts.body = JSON.stringify(body) }
+      const res = await fetch(`http://127.0.0.1:${envPort}` + p, opts)
+      const setC = res.headers.get('set-cookie')
+      if (setC?.includes('sid=')) envCookie = setC.split(';')[0]
+      return { status: res.status, body: await res.json().catch(() => ({})) }
+    }
+    check('the env secret is what this install demands',
+      (await envReq('POST', '/api/login', { password: 'testpw' })).status === 401 &&
+      (await envReq('POST', '/api/login', { password: 'testpw', code: totp(envSecret) })).body.ok === true)
+    check('...and the panel reports it as owned by the unit',
+      (await envReq('GET', '/api/settings')).body.totp.source === 'env')
+    check('...so enrol, enable and disable all refuse the panel rather than lying',
+      (await envReq('POST', '/api/settings/2fa/begin')).status === 409 &&
+      (await envReq('POST', '/api/settings/2fa/enable', { code: '000000' })).status === 409 &&
+      (await envReq('POST', '/api/settings/2fa/disable', { password: 'testpw' })).status === 409)
+    check('...leaving it on', (await envReq('GET', '/api/settings')).body.totp.enabled === true)
+  } finally {
+    second.kill()
+  }
+  fs.rmSync(path.join(FIX, 'state-env'), { recursive: true, force: true })
 
   // last: five wrong passwords lock the address out, so nothing may need to log in after this
   for (let i = 0; i < 5; i++) await req('POST', '/api/login', { password: 'nope' })
