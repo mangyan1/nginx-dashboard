@@ -18,7 +18,9 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
     serveHttp: site?.serveHttp !== false,
     httpsPort: site?.httpsPort || 443,
     index: site?.index || 'index.html index.htm',
+    clientMaxBodySize: site?.clientMaxBodySize || 0,
     https: site?.https || { mode: 'none', forceRedirect: false, manualCert: '', manualKey: '' },
+    hsts: site?.hsts || { enabled: false, maxAge: 31536000, includeSubDomains: false, preload: false },
     listen: site?.listen || { http2: false, http3: false, reuseport: false },
     php: site?.php || PHP_BLANK,
     proxy: site?.proxy ? [...site.proxy] : [],
@@ -109,6 +111,8 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
         <Field label="Document root"><input value={s.root} onChange={e => set({ root: e.target.value })} placeholder={`/var/www/${s.name || 'myapp'}`} /></Field>
         <Field label="Index files (in order)"><input value={s.index} onChange={e => set({ index: e.target.value })} placeholder="index.php index.html" /></Field>
         <Field label="Port (HTTP)"><input type="number" value={s.port} onChange={e => set({ port: Number(e.target.value) })} /></Field>
+        <Field label="Max request body (MB)"><input type="number" min="0" value={s.clientMaxBodySize} onChange={e => set({ clientMaxBodySize: Number(e.target.value) })} placeholder="0" /></Field>
+        <p className="hint">0 keeps nginx's own 1m default. Raise it for large uploads — nginx answers 413 before the file ever reaches PHP or the backend.</p>
       </Section>
 
       <Section title="HTTPS">
@@ -127,6 +131,19 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
         <Field label="Port (HTTPS)"><input type="number" value={s.httpsPort} onChange={e => set({ httpsPort: Number(e.target.value) })} /></Field>
         <Toggle checked={s.serveHttp} onChange={v => set({ serveHttp: v })} label="Also serve plain HTTP on the port above" />
         {s.serveHttp && s.https.mode !== 'none' && <Toggle checked={s.https.forceRedirect} onChange={v => upS({ forceRedirect: v })} label={`Force HTTPS redirect (plain HTTP → 301 on port ${s.httpsPort})`} />}
+        {/* Only offered once there is a certificate to enforce — the header is ignored on a
+            plain-HTTP response, so on an HTTPS-off site the toggle would do nothing at all. */}
+        {s.https.mode !== 'none' && <>
+          <Toggle checked={s.hsts.enabled} onChange={v => set({ enabled: v }, 'hsts')} label="HSTS — tell browsers to refuse plain HTTP for this domain" />
+          {s.hsts.enabled && <>
+            <p className="hint">A one-way door: once a browser has seen this header it will refuse plain HTTP to {s.domains.trim() || 'this domain'} for the whole max-age, even if you turn this off again. Turn it on when HTTPS is confirmed working, not before.</p>
+            <Field label={`Max-age: ${Math.round(s.hsts.maxAge / 86400)} days`}>
+              <input type="range" min="86400" max="63072000" step="86400" value={s.hsts.maxAge} onChange={e => set({ maxAge: Number(e.target.value) }, 'hsts')} />
+            </Field>
+            <Toggle checked={s.hsts.includeSubDomains} onChange={v => set({ includeSubDomains: v }, 'hsts')} label="Include subdomains — every subdomain must then serve a valid cert too" />
+            <Toggle checked={s.hsts.preload} onChange={v => set({ preload: v }, 'hsts')} label="preload — opt in to the browsers' hardcoded list (needs one year and subdomains)" />
+          </>}
+        </>}
         <div className="row">
           {!isNew && <>
             <Btn disabled={busy} onClick={selfSigned} title="issue a self-signed cert now — HTTPS works instantly">Issue self-signed</Btn>
@@ -145,7 +162,7 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
           </div>
         ))}
         <Btn onClick={() => setArr('proxy', [...s.proxy, { path: '/', target: 'http://127.0.0.1:8080', verify: false }])}>+ proxy rule</Btn>
-        <p className="hint">Empty proxy list = serve static files from the document root.</p>
+        <p className="hint">Empty proxy list = serve static files from the document root, resolving <code>/about</code> to <code>about.html</code> as well as <code>about/index.html</code> — which is what a static Astro or Next export needs. A rule on <code>/</code> replaces that.</p>
       </Section>
 
       <Section title="Application backend">

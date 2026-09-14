@@ -125,7 +125,7 @@ function findSite(name) {
 
 function sanitizeSite(input, base) {
   const s = { ...base, ...input }
-  for (const k of ['https', 'listen', 'php', 'rateLimit', 'ipRules', 'basicAuth', 'gzip', 'staticCache']) {
+  for (const k of ['https', 'hsts', 'listen', 'php', 'rateLimit', 'ipRules', 'basicAuth', 'gzip', 'staticCache']) {
     s[k] = { ...(base?.[k] || defaultSite(s.name)[k]), ...(input?.[k] || {}) }
   }
   s.proxy = Array.isArray(input?.proxy) ? input.proxy : (base?.proxy || [])
@@ -137,6 +137,9 @@ function sanitizeSite(input, base) {
   if (typeof s.port !== 'number' || s.port < 1 || s.port > 65535) s.port = 80
   if (typeof s.httpsPort !== 'number' || s.httpsPort < 1 || s.httpsPort > 65535) s.httpsPort = 443
   if (typeof s.index !== 'string' || !s.index.trim()) s.index = 'index.html index.htm'
+  // validateSite rejects an out-of-range value outright; this only keeps a bad one from being
+  // rendered if a caller ever reaches the writer without validating first.
+  if (!Number.isInteger(s.clientMaxBodySize) || s.clientMaxBodySize < 0) s.clientMaxBodySize = 0
   return s
 }
 

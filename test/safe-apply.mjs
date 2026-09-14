@@ -213,6 +213,51 @@ check('proxy site still emits its docroot', withProxy.includes('root /var/www/p;
 check('proxy site still emits a proxy location', withProxy.includes('location /api {'), withProxy)
 check('static-cache block survives alongside a proxy rule', withProxy.includes('expires 30d;'), withProxy)
 
+// ---- 8b. the static fallback, the body limit, and HSTS ----
+// A static generator that writes `about.html` for `/about` 404s under a bare root + index.
+// The fallback has to appear once per server block and stand down for anything else wanting `/`.
+const plain = { ...defaultSite('s'), domains: ['s.test'], root: '/var/www/s' }
+const sConf = renderSiteConf(plain)
+const sTls = renderSiteConf({ ...plain, https: { mode: 'selfsigned', forceRedirect: false, manualCert: '', manualKey: '' } })
+check('a static site resolves /about from about.html', sConf.includes('try_files $uri $uri/ $uri.html =404;'), sConf)
+check('exactly one location / when nothing else claims it', (sConf.match(/location \/ \{/g) || []).length === 1, sConf)
+check('a root proxy rule replaces the static fallback',
+  !renderSiteConf({ ...plain, proxy: [{ path: '/', target: 'http://127.0.0.1:8080' }] }).includes('$uri.html'), 'two location / blocks would fail nginx -t')
+check('so does a php front controller',
+  !renderSiteConf({ ...plain, php: { enabled: true, endpoint: 'unix:/run/php/php8.3-fpm.sock', frontController: true } }).includes('$uri.html'))
+check('a non-root proxy rule keeps it',
+  renderSiteConf({ ...plain, proxy: [{ path: '/api', target: 'http://127.0.0.1:8080' }] }).includes('$uri.html'), 'the rest of the docroot still has to resolve')
+
+check('the body limit is absent by default', !sConf.includes('client_max_body_size'), 'nginx keeps its own 1m')
+check('the body limit is emitted in MB', renderSiteConf({ ...plain, clientMaxBodySize: 64 }).includes('client_max_body_size 64m;'))
+
+// HSTS is the one directive that has to be written twice: `add_header` does not merge into a
+// location that declares one of its own, and the static-cache block declares Cache-Control.
+const tls = { mode: 'selfsigned', forceRedirect: false, manualCert: '', manualKey: '' }
+const hsts = { enabled: true, maxAge: 31536000, includeSubDomains: true, preload: false }
+const dual = { ...plain, https: tls, hsts, clientMaxBodySize: 64 }
+const hConf = renderSiteConf(dual)
+const [httpBlock, tlsBlock] = hConf.split('server {').slice(1)
+check('the body limit lands in both blocks', (hConf.match(/client_max_body_size 64m;/g) || []).length === 2, hConf)
+check('hsts is emitted on the tls listener', tlsBlock.includes('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'), tlsBlock)
+check('hsts is repeated inside the static-cache location',
+  (tlsBlock.match(/Strict-Transport-Security/g) || []).length === 2, 'add_header does not inherit past a location that sets its own')
+check('...and the repeat is inside that location, not after it',
+  tlsBlock.indexOf('Strict-Transport-Security', tlsBlock.indexOf('Cache-Control')) < tlsBlock.indexOf('}', tlsBlock.indexOf('Cache-Control')),
+  'emitted past the closing brace it would land at server scope and silently do nothing')
+check('the plain-http block carries no hsts', !httpBlock.includes('Strict-Transport-Security'), 'the header is ignored over http, so the cache location there must not claim it either')
+check('...and that block really did render a cache location', httpBlock.includes('Cache-Control'), 'otherwise the check above passes for the wrong reason')
+check('preload rides along when asked', renderSiteConf({ ...dual, hsts: { ...hsts, preload: true } }).includes('max-age=31536000; includeSubDomains; preload"'))
+check('hsts is off unless turned on', !sTls.includes('Strict-Transport-Security'))
+check('hsts on a site with no certificate is not emitted', !renderSiteConf({ ...plain, hsts }).includes('Strict-Transport-Security'), 'ignored on http, so emitting it would misdescribe the site')
+
+check('a body limit over 10 GB is rejected', validateSite({ ...plain, clientMaxBodySize: 20000 }).some(e => e.includes('invalid max request body')))
+check('a negative body limit is rejected', validateSite({ ...plain, clientMaxBodySize: -1 }).some(e => e.includes('invalid max request body')))
+check('a fractional body limit is rejected', validateSite({ ...plain, clientMaxBodySize: 1.5 }).some(e => e.includes('invalid max request body')))
+check('preload without subdomains is rejected', validateSite({ ...dual, hsts: { enabled: true, maxAge: 31536000, includeSubDomains: false, preload: true } }).some(e => e.includes('preload requires includeSubDomains')))
+check('preload under a year is rejected', validateSite({ ...dual, hsts: { enabled: true, maxAge: 86400, includeSubDomains: true, preload: true } }).some(e => e.includes('preload requires a max-age')))
+check('a preload-ready site validates', validateSite({ ...dual, hsts: { ...hsts, preload: true } }).length === 0, JSON.stringify(validateSite({ ...dual, hsts: { ...hsts, preload: true } })))
+
 // ---- 9. history: a change that *succeeded* and turned out to be wrong ----
 // Sections 1-5 prove a failed change rolls back. That leaves the case this exists for: nginx
 // accepted it, it is live, and it was the wrong change. Nothing else can undo that.

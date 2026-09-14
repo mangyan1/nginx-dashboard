@@ -8,7 +8,7 @@ Runs next to nginx on your Ubuntu/Debian server.
 | Tab | What it does |
 |---|---|
 | **control** | start / stop / restart nginx, reload config (`nginx -s reload`), test config (`nginx -t`) |
-| **sites** | create / edit / delete / enable / disable server blocks; per-site form covering: reverse-proxy rules, load-balancer upstreams (round robin / least connections / IP hash, http & https backends, passive health checks), **PHP / FastCGI backends**, HTTPS on any port (self-signed / Let's Encrypt / existing certs, force-redirect, TLS-only vhosts), rate limiting, IP allow/deny lists, basic auth, gzip, HTTP/2 & HTTP/3 (+ reuseport), browser caching; built-in file manager with multi-upload and **deploy-folder-as-zip** |
+| **sites** | create / edit / delete / enable / disable server blocks; per-site form covering: reverse-proxy rules, load-balancer upstreams (round robin / least connections / IP hash, http & https backends, passive health checks), **PHP / FastCGI backends**, HTTPS on any port (self-signed / Let's Encrypt / existing certs, force-redirect, TLS-only vhosts, **HSTS**), static sites incl. `.html`-per-page generators, request-body limit, rate limiting, IP allow/deny lists, basic auth, gzip, HTTP/2 & HTTP/3 (+ reuseport), browser caching; built-in file manager with multi-upload and **deploy-folder-as-zip** |
 | **logs** | live tail of access.log & error.log (SSE), rotate, purge old rotated logs |
 | **metrics** | stub_status stats + live active-connections chart |
 
@@ -62,8 +62,33 @@ under *Reverse proxy*. PHP-FPM and anything else that speaks FastCGI is a
 
 Hardening emitted for every site: dotfiles denied (`location ~ /\.(?!well-known)`)
 in both blocks, TLS 1.2+ only, `ssl_session_tickets off`, and a shared session
-cache. Not emitted, deliberately: HSTS (a one-way door — needs its own toggle)
-and `client_max_body_size` (raise it yourself for large WordPress uploads).
+cache.
+
+Two more are opt-in per site, both off by default:
+
+- **HSTS** — a one-way door. A browser that has seen the header refuses plain
+  HTTP to the domain for the whole `max-age`, and that outlives turning the
+  toggle back off, so it is offered only once a certificate is configured and
+  the form says so. `includeSubDomains` and `preload` are separate switches;
+  preload asks for a year *and* subdomains because hstspreload.org rejects
+  anything less, and the dashboard refuses to save that combination.
+- **Max request body** — in MB, `0` leaving nginx's own 1m default. nginx
+  answers 413 before the body ever reaches PHP or the proxy target, so a
+  WordPress upload over 1 MB needs this raised.
+
+## Static sites
+
+A site with no proxy rule and no front controller gets
+`try_files $uri $uri/ $uri.html =404`. That is what serves `/about` from
+`about.html` — the shape Astro (`build.format: 'file'`, `trailingSlash:
+'never'`), Next's static export and any per-page `.html` generator emit. A bare
+`root` + `index` 404s those URLs, because `$uri` is not a directory and `$uri/`
+does not exist. It costs nothing where no such file is present and cannot reach
+a `.php`, since the suffix is fixed — `/wp-config` looks for `wp-config.html`.
+
+A rule on `/` replaces it: the fallback, the PHP front controller and a root
+proxy rule are all `location /`, and nginx refuses a duplicate, so the explicit
+proxy rule wins and the fallback stands down.
 
 ## Security model
 

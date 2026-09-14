@@ -165,6 +165,37 @@ try {
     fs.readFileSync(path.join(FIX, 'www', 'catchall', 'index.html'), 'utf8').includes('<h1>catchall</h1>'))
   check('cleanup', (await req('DELETE', '/api/sites/catchall')).body.ok === true)
 
+  // the static fallback, the request-body limit and HSTS — through the API, since these are
+  // new fields and the round trip is what proves sanitizeSite does not drop them
+  const stat = await req('POST', '/api/sites', { name: 'static1', domains: ['static1.test'], root: path.join(FIX, 'www', 'static1') })
+  check('static site created', stat.status === 200, JSON.stringify(stat.body))
+  const statPath = path.join(FIX, 'nginx', 'sites-available', 'static1.conf')
+  let statConf = fs.readFileSync(statPath, 'utf8')
+  check('a static site gets the .html fallback', statConf.includes('try_files $uri $uri/ $uri.html =404;'), statConf)
+  check('...and neither new directive by default',
+    !statConf.includes('client_max_body_size') && !statConf.includes('Strict-Transport-Security'))
+
+  const secured = await req('PUT', '/api/sites/static1', {
+    https: { mode: 'selfsigned', forceRedirect: false },
+    clientMaxBodySize: 64,
+    hsts: { enabled: true, maxAge: 31536000, includeSubDomains: true, preload: false },
+  })
+  check('body limit and hsts saved', secured.status === 200, JSON.stringify(secured.body))
+  statConf = fs.readFileSync(statPath, 'utf8')
+  check('body limit reaches the conf', statConf.includes('client_max_body_size 64m;'), statConf)
+  check('hsts reaches the tls block', statConf.includes('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'))
+  check('hsts is re-emitted in the cache location', (statConf.match(/Strict-Transport-Security/g) || []).length === 2, statConf)
+  check('the plain-http block carries no hsts', !statConf.split('server {')[1].includes('Strict-Transport-Security'))
+
+  check('an out-of-range body limit is refused', (await req('PUT', '/api/sites/static1', { clientMaxBodySize: 99999 })).status === 400)
+  check('preload without subdomains is refused', (await req('PUT', '/api/sites/static1', { hsts: { enabled: true, maxAge: 31536000, includeSubDomains: false, preload: true } })).status === 400)
+  check('the conf is untouched after those refusals', fs.readFileSync(statPath, 'utf8') === statConf)
+
+  const taken = await req('PUT', '/api/sites/static1', { proxy: [{ path: '/', target: 'http://127.0.0.1:8080' }] })
+  check('a root proxy rule withdraws the fallback',
+    taken.status === 200 && !fs.readFileSync(statPath, 'utf8').includes('$uri.html'), JSON.stringify(taken.body))
+  check('cleanup', (await req('DELETE', '/api/sites/static1')).body.ok === true)
+
   // files: upload + traversal guard + delete
   const fd = new FormData()
   fd.append('files', new Blob(['<h1>hi</h1>']), 'index.html')
