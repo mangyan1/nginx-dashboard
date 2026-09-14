@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { Btn } from './ui.jsx'
 import SiteForm from './SiteForm.jsx'
+import NginxFiles from './NginxFiles.jsx'
 
 // What the row's subtitle line says. Managed sites carry their real config; the ones that only
 // exist as a conf file on disk have nothing but the name.
@@ -42,7 +43,8 @@ export default function Sites({ onDirty, openSite, onOpened }) {
   if (sites === null) return <div className="loading">…</div>
 
   const creating = selected === 'new'
-  const site = !creating && selected ? sites.find(s => s.name === selected) : null
+  const browsing = selected === 'files'
+  const site = !creating && !browsing && selected ? sites.find(s => s.name === selected) : null
   // The dashboard's own vhost stays in `sites` — the form looks its config up from there — but it
   // is not one of the sites you serve, so it is not listed, not counted, and not the empty state.
   const listed = sites.filter(s => !s.self)
@@ -84,16 +86,23 @@ export default function Sites({ onDirty, openSite, onOpened }) {
               </li>
             )}
           </ul>
-          <Btn kind="primary" onClick={() => select('new')}>+ New site</Btn>
+          <div className="row">
+            <Btn kind="primary" onClick={() => select('new')}>+ New site</Btn>
+            <Btn onClick={() => select('files')} title="what is actually in sites-available and sites-enabled, as files">nginx files</Btn>
+          </div>
         </div>
       </aside>
 
       <section className="site-pane">
         {creating && <SiteForm key="new" onSaved={name => { load(); setSelected(name) }} onDirty={markDirty} />}
-        {site && <SiteForm key={site.name} site={site} onDirty={markDirty}
+        {browsing && <NginxFiles />}
+        {/* A conf on disk with no manifest entry has no config to edit — the form could only fill
+            itself from defaults and refuse the save. Show the file it actually is instead. */}
+        {site && !site.managed && <NginxFiles name={site.name} />}
+        {site && site.managed && <SiteForm key={site.name} site={site} onDirty={markDirty}
           onSaved={() => { load(); setSelected(site.name) }}
           onDeleted={() => { load(); markDirty(false); setSelected(null) }} />}
-        {!creating && !site && (
+        {!creating && !browsing && !site && (
           <div className="panel-body">
             <p className="hint">Select a site on the left, or create one. Every save writes the conf, runs <code>nginx -t</code>, and only then reloads — a config nginx rejects is rolled back and the old file stays.</p>
           </div>

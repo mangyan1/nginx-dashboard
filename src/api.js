@@ -31,6 +31,10 @@ const said = (method, path, data) => {
     if (p[2] === 'lockouts') return 'lockouts cleared'
     if (p[2] === 'history') return 'undo history cleared'
     if (p[2] === 'new-site-defaults') return 'new-site defaults saved'
+    // `apply` runs once per package behind a progress bar, so the panel is already saying it —
+    // a toast per package would be four of them stacked on top of the bar that shows the same.
+    if (p[2] === 'updates') return ''
+    if (p[2] === 'restart') return 'restarting the dashboard'
     return ''
   }
   if (p[1] === 'nginx') return `nginx ${p[2]}`

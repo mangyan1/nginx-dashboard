@@ -53,6 +53,9 @@ export default function Settings({ status, theme, onTheme }) {
   const [draft, setDraft] = useState('')
   const [history, setHistory] = useState(null)
   const [updates, setUpdates] = useState(null)
+  // { done, total, name } while a run is in flight — the bar reads its width off this and nothing
+  // else, so it can only ever show progress that happened.
+  const [progress, setProgress] = useState(null)
 
   const load = () => {
     setErr('')
@@ -60,6 +63,11 @@ export default function Settings({ status, theme, onTheme }) {
       .then(r => { setS(r); setDraft(JSON.stringify(r.newSiteDefaults, null, 2)) })
       .catch(e => setErr(e.message))
     api('GET', '/api/history').then(r => setHistory(r.entries.length)).catch(() => setHistory(null))
+    // Checked on arrival rather than behind a button. It is a GET of public version numbers, it
+    // sends nothing about this install, and "is anything behind" is the reason to open this section
+    // at all — a button in front of it only means the answer is missing until it is pressed. A GET
+    // reports nothing on failure, so a server with no outbound internet sees an empty table.
+    api('GET', '/api/settings/updates').then(setUpdates).catch(() => {})
   }
   useEffect(load, [])
 
@@ -108,18 +116,43 @@ export default function Settings({ status, theme, onTheme }) {
     setDraft(JSON.stringify(r.defaults, null, 2))
     return 'new sites will be created from this'
   })
-  const checkUpdates = () => act(async () => {
-    const r = await api('GET', '/api/settings/updates')
-    setUpdates(r)
-    // '' on success, so the fallback below is what the panel says — the table is the answer, and a
-    // bare "ok" underneath it says nothing.
-    return r.reachable ? '' : 'could not reach the npm registry from this server — nothing was changed'
-  }, 'checked against the npm registry')
+  // Only the updates. `load` also re-reads the settings and re-seeds the defaults draft, which would
+  // throw away an edit in progress to answer a question about version numbers.
+  const checkUpdates = () => api('GET', '/api/settings/updates').then(setUpdates).catch(() => {})
 
   // Counted over the packages this install actually has, not over every name in package.json: a
   // devDependency is not present on a server and there is nothing there to update.
   const known = updates?.packages.filter(p => p.installed && p.latest) || []
-  const behind = known.filter(p => p.latest !== p.installed).length
+  const behind = known.filter(p => p.latest !== p.installed)
+  // Of those, the ones npm can actually move here. A devDependency is bundled into `dist/` at build
+  // time, so bumping it on a server changes nothing that is served.
+  const updatable = behind.filter(p => p.updatable)
+
+  /**
+   * One package per request, so the bar counts something real rather than animating a promise
+   * nobody can see into. A failure stops nothing: the rest still install, and every message is
+   * kept, because the alternative is a half-updated tree and one line saying it went wrong.
+   */
+  const applyUpdates = list => act(async () => {
+    const failed = []
+    setProgress({ done: 0, total: list.length, name: list[0]?.name || '' })
+    for (const [i, p] of list.entries()) {
+      setProgress({ done: i, total: list.length, name: p.name })
+      try {
+        // 200 with {ok:false} is how the route reports npm's own failure, so api() does not throw
+        // for it — the check is here rather than in a catch that would never run.
+        const r = await api('POST', '/api/settings/updates/apply', { name: p.name })
+        if (r.ok === false) failed.push(r.error)
+      } catch (e) { failed.push(`${p.name}: ${e.message}`) }
+      setProgress({ done: i + 1, total: list.length, name: p.name })
+    }
+    setProgress(null)
+    setUpdates(await api('GET', '/api/settings/updates').catch(() => updates))
+    if (failed.length) throw new Error(failed.join('\n'))
+    return `${list.length} updated — restart to load ${list.length === 1 ? 'it' : 'them'}`
+  })
+
+  const restart = () => act(async () => (await api('POST', '/api/settings/restart')).output)
 
   return (
     <section className="panel">
@@ -264,17 +297,36 @@ export default function Settings({ status, theme, onTheme }) {
 
         <Section title="Updates">
           <p className="sub">
-            Asks the npm registry what the newest version of each of this project's dependencies is.
-            Nothing about this install is sent — the registry sees a package name and this server's
-            address, and only when you press the button. It never updates anything by itself.
+            Asks the npm registry what the newest version of each of this project's dependencies is,
+            as soon as this tab is opened. Nothing about this install is sent — the registry sees a
+            package name and this server's address. Only the two packages the server itself loads can
+            be installed from here; the rest are bundled into this page when it is built.
           </p>
           <div className="actions">
-            <Btn disabled={busy} onClick={checkUpdates}>{busy ? '…' : 'Check for updates'}</Btn>
-            {updates?.reachable && <span className="kv"><i>behind</i><b className={behind ? 'warn' : 'ok'}>{behind ? `${behind} of ${known.length}` : 'nothing'}</b></span>}
+            <Btn disabled={busy} onClick={checkUpdates}>Check again</Btn>
+            <Btn disabled={busy || !updatable.length} onClick={() => applyUpdates(updatable)}>
+              Update {updatable.length || 'nothing'}
+            </Btn>
+            {updates?.systemd && (
+              <Btn disabled={busy} onClick={restart} title="systemd starts this dashboard again — you will have to sign in">Restart dashboard</Btn>
+            )}
+            {updates?.reachable && <span className="kv"><i>behind</i><b className={behind.length ? 'warn' : 'ok'}>{behind.length ? `${behind.length} of ${known.length}` : 'nothing'}</b></span>}
           </div>
+          {progress && (
+            <div className="upd-run">
+              <div className="bar" role="progressbar" aria-valuemin="0" aria-valuemax={progress.total} aria-valuenow={progress.done}
+                aria-label={`installing ${progress.name}`}>
+                <i style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }} />
+              </div>
+              <span className="note">{progress.done} / {progress.total} — {progress.name}</span>
+            </div>
+          )}
+          {updates && !updates.reachable && (
+            <p className="hint warn">could not reach the npm registry from this server — nothing here can be checked or installed</p>
+          )}
           {updates && (
             <table>
-              <thead><tr><th>package</th><th>installed</th><th>latest</th></tr></thead>
+              <thead><tr><th>package</th><th>installed</th><th>latest</th><th /></tr></thead>
               <tbody>
                 {updates.packages.map(p => (
                   <tr key={p.name}>
@@ -282,6 +334,13 @@ export default function Settings({ status, theme, onTheme }) {
                     <td className={p.installed ? '' : 'dim'}>{p.installed || 'not installed'}</td>
                     <td className={p.error ? 'dim' : p.latest === p.installed ? 'dim' : 'accent'}>
                       {p.error || p.latest}
+                    </td>
+                    <td>
+                      {!p.updatable
+                        ? <span className="dim" title="a build-time dependency — it is compiled into this page, so npm moving it here would not change what is served">build-time</span>
+                        : p.installed && p.latest && p.latest !== p.installed
+                          ? <Btn disabled={busy} onClick={() => applyUpdates([p])}>{busy ? '…' : 'Update'}</Btn>
+                          : <span className="dim">—</span>}
                     </td>
                   </tr>
                 ))}

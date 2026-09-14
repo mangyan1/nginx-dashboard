@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process' // tail -F for SSE; args are a fixed 
 import {
   PATHS, MANIFEST, HTTP_CONF, mkdirs, validName, safeJoin, safeApply,
   nginxTest, systemctl, shell, listHistory, clearHistory, revertHistory, readHistoryEntry,
-  scrubHistoryPasswords,
+  scrubHistoryPasswords, listNginxFiles, readNginxConf,
 } from './lib/nginx.js'
 import {
   SELF_NAME, isSelf, defaultSite, readManifest, writeManifest, siteConfPath, enabledConfPath, certDir,
@@ -466,6 +466,28 @@ app.get('/api/sites/:name', (req, res) => {
   const site = findSite(name)
   if (!site) return res.status(404).json({ error: 'not found (unmanaged sites are read-only)' })
   res.json({ site, ...siteState(name), drift: driftOf(site), ...(site.self ? { recovery: SELF_RECOVERY } : {}) })
+})
+
+/**
+ * The two directories as files, which is the one view the manifest cannot give: a conf enabled but
+ * never written, a symlink whose target was deleted by hand, a file that is neither. Read-only, and
+ * the only route here that serves the contents of a file the operator did not create through this
+ * dashboard — `readNginxConf` confines it to those two directories.
+ */
+app.get('/api/nginx-files', (req, res) => {
+  const { available, enabled } = listNginxFiles()
+  const managed = new Set(readManifest().sites.map(s => s.name))
+  const knows = file => managed.has(file.replace(/\.conf$/, ''))
+  res.json({
+    available: available.map(name => ({ name, managed: knows(name) })),
+    enabled: enabled.map(e => ({ ...e, managed: knows(e.name) })),
+  })
+})
+
+app.get('/api/nginx-files/:name', (req, res) => {
+  const file = readNginxConf(req.params.name)
+  if (!file) return res.status(404).json({ error: 'no such conf in sites-available or sites-enabled' })
+  res.json({ file })
 })
 
 app.post('/api/sites', async (req, res) => {
@@ -939,19 +961,100 @@ const installedVersion = name => {
   } catch { return '' }
 }
 
+// What can actually be updated from here. A devDependency is bundled into `dist/` at build time and
+// is not even installed on a server that ran `npm ci --omit=dev` — npm moving its version changes
+// nothing that is served, and offering a button for it would be a button that does nothing.
+const RUNTIME_DEPS = () => {
+  try { return Object.keys(JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).dependencies || {}) }
+  catch { return [] }
+}
+
+// Where npm runs: the directory server.js itself lives in, which is the same one `installedVersion`
+// reads node_modules from. A URL is a valid `cwd`.
+const APP_DIR = new URL('.', import.meta.url)
+// npm is a shell script on Linux and a .cmd shim on Windows, and this is developed on Windows.
+const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+// Windows refuses to spawn a .cmd without a shell — execFile answers EINVAL — so the shell is turned
+// on there and only there. It stays off on the box this actually runs on, and `name` cannot reach a
+// command line unchecked regardless: it is matched against the keys of this project's own
+// package.json before anything is spawned.
+const NPM_SHELL = process.platform === 'win32'
+
 app.get('/api/settings/updates', async (req, res) => {
+  const runtime = RUNTIME_DEPS()
   const out = await Promise.all(DEP_NAMES().map(async name => {
     const installed = installedVersion(name)
+    const updatable = runtime.includes(name)
     try {
       const r = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}/latest`, { signal: AbortSignal.timeout(8000) })
-      if (!r.ok) return { name, installed, latest: '', error: `registry answered ${r.status}` }
+      if (!r.ok) return { name, installed, latest: '', updatable, error: `registry answered ${r.status}` }
       const { version } = await r.json()
-      return { name, installed, latest: version || '' }
+      return { name, installed, latest: version || '', updatable }
     } catch (e) {
-      return { name, installed, latest: '', error: e.name === 'TimeoutError' ? 'timed out' : e.message }
+      return { name, installed, latest: '', updatable, error: e.name === 'TimeoutError' ? 'timed out' : e.message }
     }
   }))
-  res.json({ packages: out, reachable: out.some(p => p.latest) })
+  // `systemd` tells the panel whether a restart is even on offer: nothing else will start this
+  // process again, so offering the button where it would only stop the dashboard is the one mistake
+  // here that cannot be undone from the browser.
+  res.json({ packages: out, reachable: out.some(p => p.latest), systemd: !!process.env.INVOCATION_ID })
+})
+
+/**
+ * Install one package at the registry's newest version, then prove it still imports.
+ *
+ * The second half is not ceremony. A restart is what applies an update, and the way back from a
+ * node_modules that cannot be imported is a shell — the one thing this dashboard exists to not
+ * need. So the new version is imported in a child process first, and a failure puts the old version
+ * back rather than leaving a trap that springs on the next restart, when nobody is watching.
+ *
+ * `npm install <name>@latest` and not `npm update`: the point is this one package at whatever the
+ * registry says is newest, and npm writes the new range back to package.json so it survives the
+ * next `npm ci`. One package per request, which is what lets the UI draw real progress.
+ */
+app.post('/api/settings/updates/apply', async (req, res) => {
+  const name = String(req.body?.name || '')
+  if (!RUNTIME_DEPS().includes(name)) return res.status(400).json({ error: 'not a runtime dependency of this install' })
+  if (DRY) return res.status(409).json({ error: 'dry run — nothing is installed' })
+  const before = installedVersion(name)
+  const install = v => shell(NPM, ['install', '--no-audit', '--no-fund', `${name}@${v}`], { cwd: APP_DIR, timeout: 180_000, shell: NPM_SHELL })
+
+  const r = await install('latest')
+  if (r.status !== 0) {
+    return res.json({ ok: false, name, error: `npm could not install ${name} — ${(r.stderr || r.stdout).trim().slice(-2000)}` })
+  }
+  const after = installedVersion(name)
+  const loads = await shell(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(name)})`], { cwd: APP_DIR, timeout: 60_000 })
+  if (loads.status === 0) {
+    return res.json({ ok: true, name, output: `${before || 'not installed'} → ${after} — restart to load it`, restart: true })
+  }
+
+  const back = before ? await install(before) : { status: 0 }
+  return res.json({
+    ok: false, name,
+    error: `${after} was installed but does not import`
+      + (before ? (back.status === 0 ? ` — put ${before} back` : ` — and putting ${before} back also failed, run: npm ci`) : '')
+      + `. Restarting now would take the dashboard down.\n${(loads.stderr || '').trim().slice(-1000)}`,
+  })
+})
+
+/**
+ * Restart this process so an update takes effect. Sessions are in memory, so this signs everyone
+ * out — hence the message rather than a silent reconnect.
+ *
+ * `INVOCATION_ID` is set by systemd for every service it starts, which is what makes "am I
+ * supervised" answerable instead of guessed at. It has to be answered: a dashboard started by hand
+ * in a terminal would simply be gone, and there would be no CLI to bring it back. Exit 1 because the
+ * shipped unit is `Restart=on-failure` — 0 is a clean exit and nothing would start it again.
+ */
+app.post('/api/settings/restart', (req, res) => {
+  if (!process.env.INVOCATION_ID) {
+    return res.status(409).json({ error: 'this dashboard was not started by systemd — restart it the way you started it' })
+  }
+  // The response goes first, and the delay is it leaving: exiting in the same tick drops the socket
+  // and the browser reports a network error instead of what happened.
+  res.json({ ok: true, output: 'restarting — sign in again in a moment' })
+  setTimeout(() => process.exit(1), 300)
 })
 
 // static frontend shell is not secret (all server data flows through the guarded /api);

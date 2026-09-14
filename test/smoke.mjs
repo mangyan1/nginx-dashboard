@@ -15,6 +15,10 @@ const env = {
   ...process.env,
   DASH_PASSWORD: 'testpw', DASH_DRY: '1', DASH_PORT: '3123', DASH_HOST: '127.0.0.1',
   DASH_SELF_NAME: 'nxd',
+  // Explicitly empty, not inherited: systemd sets this for every service it starts, and the restart
+  // route reads it to decide whether anything would start this process again. Inheriting it from a
+  // developer's shell would make the refusal below untestable in exactly the environment it matters.
+  INVOCATION_ID: '',
   DASH_NGINX_DIR: path.join(FIX, 'nginx'),
   DASH_SITES_AVAIL: path.join(FIX, 'nginx', 'sites-available'),
   DASH_SITES_EN: path.join(FIX, 'nginx', 'sites-enabled'),
@@ -69,6 +73,10 @@ try {
 
   // auth
   check('unauthenticated blocked', (await req('GET', '/api/sites')).status === 401)
+  // Both of these hand back file contents or install packages, so they are checked before the
+  // session exists rather than assumed to be behind the same middleware as everything else.
+  check('...including the conf reader', (await req('GET', '/api/nginx-files/nxd')).status === 401)
+  check('...and the updater', (await req('POST', '/api/settings/updates/apply', { name: 'express' })).status === 401)
   check('wrong password rejected', (await req('POST', '/api/login', { password: 'nope' })).status === 401)
   check('login sets cookie', (await req('POST', '/api/login', { password: 'testpw' })).body.ok === true)
 
@@ -278,6 +286,52 @@ try {
   const foreign = list.body.sites.find(s => s.name === 'foreign')
   check('unmanaged site listed', foreign && foreign.managed === false)
   check('unmanaged not editable', (await req('GET', '/api/sites/foreign')).status === 404)
+
+  // ---- the directories as files: what "nginx files" on Sites renders ----
+  // A dangling link is the state this exists to show and the dashboard never writes one, so it is
+  // made here by hand — the way deleting a conf with `rm` and leaving its symlink behind does.
+  fs.symlinkSync(path.join(FIX, 'nginx', 'sites-available', 'foreign.conf'),
+    path.join(FIX, 'nginx', 'sites-enabled', 'foreign.conf'), 'file')
+  fs.symlinkSync(path.join(FIX, 'nginx', 'sites-available', 'vanished.conf'),
+    path.join(FIX, 'nginx', 'sites-enabled', 'vanished.conf'), 'file')
+  const nf = await req('GET', '/api/nginx-files')
+  check('the nginx file list answers', nf.status === 200, JSON.stringify(nf.body))
+  check('sites-available is listed as files', nf.body.available.some(f => f.name === 'foreign.conf'))
+  check('...tagged with whether the manifest manages it',
+    nf.body.available.find(f => f.name === 'myapp.conf')?.managed === true &&
+    nf.body.available.find(f => f.name === 'foreign.conf')?.managed === false)
+  const linked = nf.body.enabled.find(f => f.name === 'vanished.conf')
+  check('a link whose target is gone is reported unresolved', linked && linked.resolves === false, JSON.stringify(linked ?? null))
+  check('...and one that resolves is not',
+    nf.body.enabled.find(f => f.name === 'foreign.conf')?.resolves === true)
+
+  const readConf = await req('GET', '/api/nginx-files/foreign')
+  check('a conf is readable under the bare name the site list shows',
+    readConf.status === 200 && readConf.body.file.text === 'server {}\n', JSON.stringify(readConf.body))
+  check('...and says which directory it came from', readConf.body.file.dir === 'sites-available')
+  check('traversal is refused', (await req('GET', '/api/nginx-files/..%2Fstate%2Fmanifest.json')).status === 404)
+  check('a name that is not there is 404', (await req('GET', '/api/nginx-files/nosuch')).status === 404)
+
+  // ---- dependency updates ----
+  const deps = await req('GET', '/api/settings/updates')
+  check('the update check lists this project\'s dependencies',
+    deps.status === 200 && deps.body.packages.some(p => p.name === 'express'), JSON.stringify(deps.body).slice(0, 200))
+  // Asserted on the classification, not on versions: whether the registry answers from a test box
+  // is not this suite's business, and `p.latest` is empty when it does not.
+  check('a runtime dependency is marked installable here',
+    deps.body.packages.find(p => p.name === 'express')?.updatable === true)
+  check('...and a build-time one is not, because npm moving it changes nothing served',
+    deps.body.packages.find(p => p.name === 'react')?.updatable === false)
+  check('the restart is refused when nothing is supervising this process',
+    (await req('POST', '/api/settings/restart')).status === 409)
+  check('installing a build-time dependency is refused',
+    (await req('POST', '/api/settings/updates/apply', { name: 'react' })).status === 400)
+  check('installing a package that is not a dependency is refused',
+    (await req('POST', '/api/settings/updates/apply', { name: 'left-pad' })).status === 400)
+  // The last guard, and the one that keeps a test box from writing to its own node_modules: in dry
+  // mode nothing is installed, whatever the registry said.
+  check('a dry run installs nothing',
+    (await req('POST', '/api/settings/updates/apply', { name: 'express' })).status === 409)
 
   // logs SSE
   const sse = await fetch(API + '/api/logs/tail?file=access', { headers: { cookie } })

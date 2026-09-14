@@ -17,7 +17,7 @@ process.env.DASH_LOG_DIR = path.join(D, 'logs')
 // Read at module load, so it has to be set before the import — and it makes this suite the one
 // place the self-vhost guards are exercised outside a running server.
 process.env.DASH_SELF_NAME = 'nxd'
-const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory, clearHistory, scrubHistoryPasswords } = await import('../lib/nginx.js')
+const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory, clearHistory, scrubHistoryPasswords, listNginxFiles, readNginxConf } = await import('../lib/nginx.js')
 const {
   SELF_NAME, isSelf, defaultSite, renderSiteConf, validateSite, siteConfPath, driftOf, httpConfDrift,
   renderHttpConf, readManifest, parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors,
@@ -527,6 +527,49 @@ check('turning any of them off is always allowed',
 const armed = { ...defaultSite('a'), domains: ['a.test'], https: { ...defaultSite('a').https }, hsts: { ...defaultSite('a').hsts, enabled: true } }
 check('hsts left armed with https off still saves', validateSite(armed).length === 0)
 check('...and emits no header, because it is inert rather than applied', !renderSiteConf(armed).includes('Strict-Transport-Security'))
+
+// ---- 11d. reading the config directories ----
+// The viewer's whole job is showing what the manifest cannot: a link whose target is gone, a file
+// enabled and never written. Both are built here by hand, because neither is a state the dashboard
+// will ever write itself.
+const avail = PATHS.sitesAvail
+const en = PATHS.sitesEn
+fs.mkdirSync(avail, { recursive: true })
+fs.mkdirSync(en, { recursive: true })
+fs.writeFileSync(path.join(avail, 'alpha.conf'), '# alpha\n')
+fs.writeFileSync(path.join(avail, 'backup.conf.bak'), '# not a conf\n')
+fs.writeFileSync(path.join(avail, '.hidden'), '# dotfile\n')
+fs.symlinkSync(path.join(avail, 'alpha.conf'), path.join(en, 'alpha.conf'), 'file')
+fs.symlinkSync(path.join(avail, 'gone.conf'), path.join(en, 'gone.conf'), 'file')
+fs.writeFileSync(path.join(en, 'loose'), '# a real file nginx still loads: include sites-enabled/*;\n')
+
+const listing = listNginxFiles()
+check('both directories are listed', listing.available.includes('alpha.conf') && listing.enabled.some(f => f.name === 'alpha.conf'))
+check('a conf that is not named .conf is still listed', listing.available.includes('backup.conf.bak'))
+// validName is the reader's own gate, so listing anything it would refuse is listing a dead link.
+check('...but a name the reader could not open is not', !listing.available.includes('.hidden'))
+check('an entry whose target was deleted reads as unresolved',
+  listing.enabled.find(f => f.name === 'gone.conf')?.resolves === false)
+check('...and one whose target is there does not',
+  listing.enabled.find(f => f.name === 'alpha.conf')?.resolves === true)
+// nginx includes sites-enabled/* with no extension filter, so this file is loaded and has to show.
+check('a non-conf file in sites-enabled is listed, and carries no link target',
+  listing.enabled.find(f => f.name === 'loose')?.target === '')
+
+const alpha = readNginxConf('alpha.conf')
+check('a conf is read back with its dir', alpha?.text === '# alpha\n' && alpha.dir === 'sites-available')
+check('...and a bare name finds <name>.conf, so the site list can hand over what it displays', readNginxConf('alpha')?.name === 'alpha.conf')
+// Both directories are searched, so an enabled-only conf is readable — that is the case that has
+// nowhere else to be seen.
+check('a file that exists only in sites-enabled is readable', readNginxConf('loose')?.text.startsWith('# a real file'))
+check('a name that is not there is null, not an error', readNginxConf('nosuch') === null)
+check('traversal is refused', readNginxConf('../state/manifest.json') === null && readNginxConf('..') === null)
+check('an absolute path is refused', readNginxConf('/etc/shadow') === null)
+
+// The one that matters: validName rules out traversal, but a symlink planted in sites-available
+// points anywhere, and this route returns file contents.
+fs.symlinkSync(MANIFEST, path.join(avail, 'escape.conf'), 'file')
+check('a symlink out of the nginx dir is refused rather than followed', readNginxConf('escape.conf') === null)
 
 // ---- 14. TOTP, against RFC 6238's own vectors ----
 const SEED = b32encode(Buffer.from('12345678901234567890'))

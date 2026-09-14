@@ -32,6 +32,13 @@ layout does not depend on them.
   (`/var/lib/nginx-dashboard/manifest.json`) and its `.conf` is **generated**
   from it — never parsed back. Foreign sites in `sites-available` are listed
   read-only.
+- **Sites → `nginx files` reads the two config directories as they are**, which
+  is the one view the manifest cannot give: a conf enabled but never written, a
+  symlink whose target was deleted by hand (`nginx` will not start on one), a
+  file in `sites-enabled` that is not a symlink at all. Read-only, and the only
+  place a conf's text is shown — a managed site is edited in its form, because
+  the next save rewrites the file anyway. Clicking a site the manifest does not
+  know lands here rather than in a form whose Save could only answer 404.
 - **Basic-auth passwords are not in the manifest.** nginx reads an apr1 hash, so
   that is what is stored (`{ user, hash }`); the password exists only for the
   moment it takes to hash it, and the field in the form is write-only — leaving
@@ -137,6 +144,16 @@ proxy rule wins and the fallback stands down.
   panel, and while it is set the panel says so instead of offering controls that
   would be ignored.
 - Binds to `127.0.0.1:7412` — reach it via SSH tunnel, or publish its own vhost.
+- **Dependencies can be updated from Settings → Updates**, checked against the
+  npm registry when that tab is opened. Only the two packages the server itself
+  loads are installable there; the rest are compiled into `dist/` when the page
+  is built, so npm moving one on the server would change nothing that is served
+  and those rows are marked `build-time`. An install is verified before it is
+  offered: the new version is imported in a child process, and one that will not
+  load is put back rather than left to break the dashboard on its next restart.
+  Applying it needs **Restart dashboard**, which is only offered when systemd is
+  supervising the process (`INVOCATION_ID`) — it signs you out, because sessions
+  are in memory.
 - Anyone with the password effectively has root: keep it strong.
 
 ### Reaching it from the LAN

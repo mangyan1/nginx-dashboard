@@ -186,6 +186,7 @@ a { color: var(--accent-ink); }
 .chip.off { color: var(--dimmer); }
 .chip.warn { color: var(--warn-ink); border-color: var(--warn-lo); background: rgba(210, 167, 46, .09); }
 .chip.un { color: var(--dim); border-color: var(--line); border-style: dashed; }
+.chip.err { color: var(--err); border-color: var(--err-lo); background: var(--err-bg); }
 /* "use default" — the one chip that is a button. It sits on the caption line, in the empty space
    to the right of the caption, so it can never cover what is being typed in the control below. */
 .chip.def { cursor: pointer; background: transparent; text-transform: none; letter-spacing: .06em; font-size: 9px; padding: 5px 8px; }
@@ -451,8 +452,43 @@ th:last-child, td:last-child { padding-right: 0; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important } }
 
+/* ── nginx files ───────────────────────────────────────────────────────────── */
+.nf { display: flex; flex-direction: column; gap: 6px; }
+.nf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.nf-col { min-width: 0; }
+.nf-head {
+  font: 400 9px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--dimmer);
+  padding-bottom: 9px; border-bottom: 1px solid var(--line-soft);
+}
+.nf-head .dim { letter-spacing: 0; }
+.nf-list { list-style: none; margin: 0; padding: 0; }
+.nf-list li {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer;
+  border-bottom: 1px solid var(--line-soft); font: 400 11.5px/1.4 var(--mono); color: var(--dim);
+}
+.nf-list li:hover { background: var(--surface-2); }
+.nf-list li.on { background: var(--accent-wash); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+.nf-list li.none { cursor: default; color: var(--dimmer); font-style: italic; }
+.nf-list li.none:hover { background: none; }
+.nf-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nf-path { font: 400 10px/1 var(--mono); color: var(--dimmer); letter-spacing: .04em; margin-top: 6px; }
+.nf-conf { max-height: 420px; overflow: auto; }
+
+/* ── update progress ───────────────────────────────────────────────────────── */
+.dim { color: var(--dim); }
+.upd-run { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+.bar {
+  flex: 1; height: 6px; border-radius: 3px; background: var(--track);
+  overflow: hidden; border: 1px solid var(--line-soft);
+}
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .25s ease; }
+/* A bar that slides is a bar that lies about how far along it is, and this one is counting real
+   installs — so the width only ever changes when one finishes. */
+@media (prefers-reduced-motion: reduce) { .bar > i { transition: none; } }
+.upd-run .note { font: 400 10px/1 var(--mono); color: var(--dimmer); white-space: nowrap; }
+
 @media (max-width: 1080px) {
-  .sites, .log-grid { grid-template-columns: 1fr; }
+  .sites, .log-grid, .nf-grid { grid-template-columns: 1fr; }
   .tiles { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
   .site-pane { max-height: none; }
   .log { height: 300px; }
