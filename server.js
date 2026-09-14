@@ -8,10 +8,11 @@ import { spawn } from 'node:child_process' // tail -F for SSE; args are a fixed 
 import {
   PATHS, MANIFEST, HTTP_CONF, mkdirs, validName, safeJoin, safeApply,
   nginxTest, systemctl, shell, listHistory, clearHistory, revertHistory, readHistoryEntry,
+  scrubHistoryPasswords,
 } from './lib/nginx.js'
 import {
   SELF_NAME, isSelf, defaultSite, readManifest, writeManifest, siteConfPath, enabledConfPath, certDir,
-  renderHttpConf, renderSiteConf, writeHtpasswd, validateSite, driftOf, httpConfDrift,
+  renderHttpConf, renderSiteConf, writeHtpasswd, hashUserRows, validateSite, driftOf, httpConfDrift,
   parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors,
 } from './lib/manifest.js'
 import { b32decode, newSecret, otpauth, totpValid } from './lib/totp.js'
@@ -23,6 +24,13 @@ const HOST = process.env.DASH_HOST || '127.0.0.1'
 const PASSWORD = process.env.DASH_PASSWORD
 const DRY = process.env.DASH_DRY === '1' // dev mode: write files, skip nginx -t / reload / systemctl / certbot
 const MAX_UPLOAD_MB = Number(process.env.DASH_MAX_UPLOAD_MB) || 2048
+// Read from the package.json that is actually on this box, and served, not baked into the bundle:
+// a version compiled into the frontend is the version of whatever was built, which is exactly the
+// thing you cannot trust when the question is "which release is running on this server".
+const APP_VERSION = (() => {
+  try { return JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version || '' }
+  catch { return '' }
+})()
 
 // ---------- settings ----------
 // The only file here that can hold a secret (the second-factor secret). 0600, and written
@@ -258,7 +266,7 @@ app.get('/api/status', async (req, res) => {
   // instead, which the UI would render as the version — so only send it when it is one.
   const raw = (v.stderr || v.stdout).trim()
   res.json({
-    active, version: raw.includes('nginx/') ? raw : '', dry: DRY,
+    active, version: raw.includes('nginx/') ? raw : '', dry: DRY, dashboard: APP_VERSION,
     // what the dashboard itself is bound to, so the UI can prefill a vhost that points back here
     host: HOST, port: PORT, selfName: SELF_NAME, totp: !!TOTP_SECRET, maxUploadMB: MAX_UPLOAD_MB,
     // non-loopback addresses of this box, to pick a LAN bind from. link-local IPv6 carries a
@@ -478,7 +486,10 @@ app.post('/api/sites', async (req, res) => {
   if (errs.length) return res.status(400).json({ error: errs.join('; ') + (isSelf(name) ? `\n\n${SELF_RECOVERY}` : '') })
 
   m.sites.push(site)
-  await writeHtpasswd(site)
+  // Back onto the object *before* the manifest is written: the returned rows are the hashed ones,
+  // and `site` is what writeSiteFiles stores. Left unassigned, the plaintext the form sent would be
+  // what lands in the manifest — the hashing would look like it worked and change nothing.
+  site.basicAuth = { ...site.basicAuth, users: await writeHtpasswd(site) }
   const result = await apply(siteFiles(name), () => writeSiteFiles(site, m), { label: `create site ${name}`, testLink: testLinkFor(name) })
   if (!result.ok) return res.status(422).json({ error: result.output })
 
@@ -505,7 +516,7 @@ app.put('/api/sites/:name', async (req, res) => {
   if (isSelf(name)) errs.push(...selfSiteErrors(site, { host: HOST, port: PORT, enabled: linkExists(name) }))
   if (errs.length) return res.status(400).json({ error: errs.join('; ') + (isSelf(name) ? `\n\n${SELF_RECOVERY}` : '') })
 
-  await writeHtpasswd(site)
+  site.basicAuth = { ...site.basicAuth, users: await writeHtpasswd(site) }
   m.sites = m.sites.map(s => (s.name === name ? site : s))
   const result = await apply(siteFiles(name), () => writeSiteFiles(site, m), { label: `update site ${name}`, testLink: testLinkFor(name) })
   if (!result.ok) return res.status(422).json({ error: result.output })
@@ -958,5 +969,37 @@ app.use((err, req, res, _next) => {
   }
   res.status(500).json({ error: 'internal error' })
 })
+
+// A manifest written before this version carries basic-auth passwords in plaintext. Hash them once
+// here rather than waiting for each site to be saved: the file on disk is the thing being fixed, and
+// a site nobody edits again would keep its plaintext for ever. A row is rewritten only when it
+// still has a `password`, so this runs once and then finds nothing to do.
+//
+// Not fatal on failure — a missing openssl must not stop the dashboard from starting — and the row
+// is left exactly as it was, which the next save of that site will migrate instead.
+async function migrateBasicAuth() {
+  const m = readManifest()
+  let changed = false
+  for (const s of m.sites) {
+    if (!(s.basicAuth?.users || []).some(u => u?.password)) continue
+    try {
+      s.basicAuth = { ...s.basicAuth, users: await writeHtpasswd(s) }
+      changed = true
+    } catch (e) {
+      console.error(`could not hash the stored basic-auth password for "${s.name}": ${e.message}`)
+    }
+  }
+  if (changed) writeManifest(m)
+  // And the copies behind it. Hashing the manifest alone leaves the plaintext in the twenty undo
+  // snapshots, which is where it would have sat for as long as they took to age out.
+  try {
+    const n = await scrubHistoryPasswords(hashUserRows)
+    if (n) console.log(`hashed stored basic-auth passwords in ${n} history snapshot${n === 1 ? '' : 's'}`)
+  } catch (e) {
+    console.error(`could not scrub the undo history: ${e.message}`)
+  }
+}
+
+await migrateBasicAuth()
 
 app.listen(PORT, HOST, () => console.log(`nginx-dashboard on http://${HOST}:${PORT} (dry=${DRY})`))

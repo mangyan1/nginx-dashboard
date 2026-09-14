@@ -236,13 +236,14 @@ export default function Settings({ status, theme, onTheme }) {
           {/* Not in the row above: these are absolute paths, and a `.kv` value is nowrap by design —
               two of them side by side run into each other and neither is readable. */}
           <ul>
-            <li><code>{s.env.manifest}</code> — the sites, and their basic-auth passwords in plaintext</li>
+            <li><code>{s.env.manifest}</code> — the sites and their upstream backends, and the basic-auth users as apr1 hashes (never the passwords themselves)</li>
             <li><code>{s.env.settings}</code> — what this page writes</li>
           </ul>
           <p className="sub">
             Every write keeps a snapshot of the conf files and the manifest, so the last twenty
-            changes can be undone from the Logs tab. Each snapshot carries the manifest too, which is
-            why clearing them is how you hand the box over without the passwords in it.
+            changes can be undone from the Logs tab. Each snapshot carries the manifest too — the
+            upstream hosts it names are the internal network map — which is why clearing them is how
+            you hand the box over.
           </p>
           <div className="actions">
             <Btn disabled={busy || !history} onClick={() => act(async () => {

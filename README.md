@@ -7,8 +7,8 @@ Runs next to nginx on your Ubuntu/Debian server.
 
 | Tab | What it does |
 |---|---|
-| **control** | start / stop / restart nginx, reload config (`nginx -s reload`), test config (`nginx -t`) |
 | **sites** | create / edit / delete / enable / disable server blocks; per-site form covering: reverse-proxy rules, load-balancer upstreams (round robin / least connections / IP hash, http & https backends, passive health checks), **PHP / FastCGI backends**, HTTPS on any port (self-signed / Let's Encrypt / existing certs, force-redirect, TLS-only vhosts, **HSTS**), static sites incl. `.html`-per-page generators, request-body limit, rate limiting, IP allow/deny lists, basic auth, gzip, HTTP/2 & HTTP/3 (+ reuseport), browser caching; built-in file manager with multi-upload and **deploy-folder-as-zip** |
+| **control** | start / stop / restart nginx, reload config (`nginx -s reload`), test config (`nginx -t`) |
 | **logs** | live tail of access.log & error.log (SSE), rotate, purge old rotated logs |
 | **metrics** | stub_status stats + live active-connections chart |
 | **settings** | the second factor (enrol, or turn off with the password), sign-in lockouts and clearing them, what a new site is created from, undo-history maintenance, dark/light, a dependency-version check, and a read-only view of where this install lives |
@@ -32,6 +32,15 @@ layout does not depend on them.
   (`/var/lib/nginx-dashboard/manifest.json`) and its `.conf` is **generated**
   from it — never parsed back. Foreign sites in `sites-available` are listed
   read-only.
+- **Basic-auth passwords are not in the manifest.** nginx reads an apr1 hash, so
+  that is what is stored (`{ user, hash }`); the password exists only for the
+  moment it takes to hash it, and the field in the form is write-only — leaving
+  it blank means "unchanged", not "no password". A manifest written by an older
+  version is hashed once at startup, so upgrading is what removes the plaintext
+  rather than the next time you happen to edit that site. This matters less for
+  the protected site than for everywhere else: an operator's basic-auth password
+  is often one they have used before, and a root-readable file holding it in the
+  clear is a leak of that password *for every other service it opens*.
 - The dashboard's own settings live beside it in `settings.json` (mode 0600):
   the second-factor secret and what a new site is created from. Kept out of the
   manifest on purpose — the undo history restores whole site objects, and a

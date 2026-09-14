@@ -8,9 +8,12 @@ import Metrics from './components/Metrics.jsx'
 import Settings from './components/Settings.jsx'
 import Toaster from './components/Toaster.jsx'
 
+// Sites first: the vhosts are what this dashboard is *for*, and Control is where you go when one
+// of them is not answering. The 01…05 prefixes are the array index, so this order is the only
+// thing that decides them.
 const TABS = [
-  ['control', 'Control'],
   ['sites', 'Sites'],
+  ['control', 'Control'],
   ['logs', 'Logs'],
   ['metrics', 'Metrics'],
   ['settings', 'Settings'],
@@ -23,7 +26,7 @@ const nginxVer = v => (String(v || '').match(/nginx\/([\d.]+)/) || [])[1] || '�
 
 export default function App() {
   const [authed, setAuthed] = useState(null) // null = unknown
-  const [tab, setTab] = useState(() => location.hash.slice(1) || 'control')
+  const [tab, setTab] = useState(() => location.hash.slice(1) || TABS[0][0])
   const [status, setStatus] = useState(null)
   const [dirty, setDirty] = useState(false) // a site form has unsaved edits
   const [theme, setTheme] = useState(readTheme)
@@ -117,7 +120,12 @@ export default function App() {
           </nav>
           <div className="rail-foot">
             <img src="/branding/logo-primary.svg" alt="" width="20" height="20" />
-            <div className="ver">{status?.version ? nginxVer(status.version) : '—'}</div>
+            {/* Both halves named: two bare numbers in a corner are a puzzle, and the one that
+                answers "which release is deployed" is this dashboard's own, not nginx's. */}
+            <div className="ver">
+              <span>nxd {status?.dashboard || '—'}</span>
+              <span className="dim">nginx {status?.version ? nginxVer(status.version) : '—'}</span>
+            </div>
           </div>
         </aside>
         <main className="main">

@@ -17,14 +17,23 @@ process.env.DASH_LOG_DIR = path.join(D, 'logs')
 // Read at module load, so it has to be set before the import — and it makes this suite the one
 // place the self-vhost guards are exercised outside a running server.
 process.env.DASH_SELF_NAME = 'nxd'
-const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory, clearHistory } = await import('../lib/nginx.js')
+const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory, clearHistory, scrubHistoryPasswords } = await import('../lib/nginx.js')
 const {
   SELF_NAME, isSelf, defaultSite, renderSiteConf, validateSite, siteConfPath, driftOf, httpConfDrift,
   renderHttpConf, readManifest, parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors,
+  writeHtpasswd, htpasswdPath, hashUserRows,
 } = await import('../lib/manifest.js')
 const { b32encode, b32decode, totp, totpValid, newSecret, otpauth } = await import('../lib/totp.js')
 
 const realRun = hooks.run
+// `hooks.run` is stubbed throughout this suite so the pipeline can be driven without nginx. The
+// hashing tests need the real process back: openssl's output *is* what they assert on, and a stub
+// returning an empty hash passes a "no plaintext stored" check while proving nothing at all.
+const withRealShell = async fn => {
+  const stubbed = hooks.run
+  hooks.run = realRun
+  try { return await fn() } finally { hooks.run = stubbed }
+}
 let failed = 0
 let ran = 0
 const check = (name, cond, extra = '') => {
@@ -323,10 +332,40 @@ check('retention drops the oldest, not the newest', kept[0].label === 'change 21
 check('the oldest snapshots are gone from disk', !kept.some(e => e.label === 'change 0' || e.label === 'change 1'))
 
 // ---- 11b. clearing the history ----
-// Every snapshot carries the manifest, and the manifest carries the basic-auth passwords in
-// plaintext — so this is not housekeeping, it is the thing an operator about to hand the box over
-// needs. It also has to survive being asked twice, and being asked when there is nothing there.
 const histPath = path.join(PATHS.stateDir, 'history')
+
+// ---- 11c. the snapshots behind the manifest ----
+// Hashing the manifest fixes the file the dashboard reads, but the twenty snapshots hold the
+// manifest as it *was* — so a box that upgraded would keep the plaintext in state/history for as
+// long as those took to age out, which is exactly the file an operator worried about this opens.
+{
+  await withRealShell(async () => {
+    const snap = path.join(histPath, '1700000000000-abcdef.json')
+    fs.mkdirSync(histPath, { recursive: true })
+    fs.writeFileSync(snap, JSON.stringify({
+      at: 1700000000000,
+      label: 'legacy snapshot',
+      files: [{ path: MANIFEST, content: JSON.stringify({ sites: [{ name: 'legacy', basicAuth: { enabled: true, users: [{ user: 'old', password: 'oldsecret' }] } }] }, null, 2), link: null }],
+    }))
+    check('a plaintext password in a history snapshot is hashed',
+      (await scrubHistoryPasswords(hashUserRows)) === 1 && !fs.readFileSync(snap, 'utf8').includes('oldsecret'))
+    const replayed = JSON.parse(JSON.parse(fs.readFileSync(snap, 'utf8')).files[0].content)
+    const row = replayed.sites[0].basicAuth.users[0]
+    // Re-derived from the password and the salt already in the hash, by openssl itself: the only
+    // check that proves the stored hash unlocks the same password rather than merely looking like
+    // one. A revert replays this snapshot, so a different password here would be a lockout.
+    const rederived = (await realRun('openssl', ['passwd', '-apr1', '-salt', String(row.hash || '').split('$')[2], 'oldsecret'])).stdout.trim()
+    check('...to a hash that still verifies that same password, so a revert is unaffected',
+      /^\$apr1\$/.test(row.hash || '') && rederived === row.hash, `${row.hash} vs ${rederived}`)
+    check('...leaving the snapshot one revertHistory would replay', replayed.sites[0].name === 'legacy' && !!replayed.sites.length)
+    check('...and a second pass finds nothing left to do', (await scrubHistoryPasswords(hashUserRows)) === 0)
+    fs.rmSync(snap, { force: true })
+  })
+}
+
+// Every snapshot carries the manifest, and the manifest names every upstream backend — the internal
+// network map — so this is not housekeeping, it is the thing an operator about to hand the box over
+// needs. It also has to survive being asked twice, and being asked when there is nothing there.
 const beforeClear = listHistory().length
 clearHistory()
 check('clearing the history empties it', beforeClear === 20 && listHistory().length === 0, String(beforeClear))
@@ -436,6 +475,46 @@ check('...with one blank row, which writes an empty password file and 401s every
 check('...and with a username but no password, which does the same',
   validateSite({ ...defaultSite('a'), basicAuth: { enabled: true, users: [{ user: 'bob', password: '' }] } }).some(e => e.includes('401')))
 check('...but one complete row is enough', validateSite({ ...defaultSite('a'), basicAuth: { enabled: true, users: [{ user: 'bob', password: 'pw' }] } }).length === 0)
+// A stored row has a hash and no password, and it is a complete row: refusing it would make every
+// site with basic auth unsavable the moment the form stopped sending a password it cannot show.
+check('...and a stored row, which carries a hash instead of a password',
+  validateSite({ ...defaultSite('a'), basicAuth: { enabled: true, users: [{ user: 'bob', hash: '$apr1$x$y' }] } }).length === 0)
+
+// ---- writeHtpasswd: the plaintext stops here ----
+// Called with a real openssl, because the hash it produces is the thing under test — a stub would
+// only prove the stub works. The returned rows are what the manifest stores, so this is where the
+// promise "no password in the manifest" is either kept or not.
+{
+  await withRealShell(async () => {
+    const pwSite = { ...defaultSite('pwsite'), basicAuth: { enabled: true, users: [{ user: 'bob', password: 'hunter2' }] } }
+    const rows = await writeHtpasswd(pwSite)
+    check('writeHtpasswd returns rows carrying a hash, not the password',
+      rows.length === 1 && rows[0].user === 'bob' && !!rows[0].hash && rows[0].password === undefined,
+      JSON.stringify(rows))
+    check('...an apr1 hash, the format nginx is being fed',
+      /^\$apr1\$[./A-Za-z0-9]{8}\$[./A-Za-z0-9]{22}$/.test(rows[0].hash || ''), rows[0].hash)
+    check('...and the password file holds user:hash',
+      fs.readFileSync(htpasswdPath('pwsite'), 'utf8') === `bob:${rows[0].hash}\n`,
+      fs.readFileSync(htpasswdPath('pwsite'), 'utf8'))
+
+    // The row the form sends back after a save: no password, hash intact. Re-hashing a hash would
+    // write the hash itself as the password, which authenticates nothing.
+    const kept = await writeHtpasswd({ ...pwSite, basicAuth: { enabled: true, users: rows } })
+    check('a row arriving with only its hash keeps that exact hash', kept[0].hash === rows[0].hash, kept[0].hash)
+
+    // Changing it means sending a password beside the old hash, and the new one wins.
+    const changed = await writeHtpasswd({ ...pwSite, basicAuth: { enabled: true, users: [{ ...rows[0], password: 'other' }] } })
+    check('...and a password sent beside it replaces it', changed[0].hash !== rows[0].hash && /^\$apr1\$/.test(changed[0].hash), changed[0].hash)
+
+    // Disabled: the rows still come back hashed, so the manifest is migrated either way, but the
+    // file nginx reads is left alone — deleting it would break the site the moment it was turned
+    // back on.
+    const fileBefore = fs.readFileSync(htpasswdPath('pwsite'), 'utf8')
+    const off = await writeHtpasswd({ ...pwSite, basicAuth: { enabled: false, users: [{ user: 'eve', password: 'x' }] } })
+    check('a disabled site still has its rows hashed', !!off[0].hash && off[0].password === undefined)
+    check('...but its password file is left as it was', fs.readFileSync(htpasswdPath('pwsite'), 'utf8') === fileBefore)
+  })
+}
 check('gzip on with no types is refused', validateSite({ ...defaultSite('a'), gzip: { enabled: true, types: [] } }).some(e => e.includes('nothing would be compressed')))
 check('...including when every type in it is invalid', validateSite({ ...defaultSite('a'), gzip: { enabled: true, types: ['nonsense'] } }).some(e => e.includes('nothing would be compressed')))
 check('caching on with no extensions is refused', validateSite({ ...defaultSite('a'), staticCache: { enabled: true, extensions: [], expiresDays: 30 } }).some(e => e.includes('no cache location')))

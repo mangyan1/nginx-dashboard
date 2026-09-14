@@ -15,7 +15,11 @@ const CACHE_EXT = ['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'woff
 // form does not show, and a reset must merge rather than replace it.
 const PROXY_ROW = { path: '/', target: 'http://127.0.0.1:8080' }
 const SERVER_ROW = { scheme: 'http', host: '127.0.0.1', port: 3001 }
-const USER_ROW = { user: '', password: '' }
+// `hash` is the stored password and `password` is what is being typed. The password box is
+// write-only: the server keeps the apr1 hash nginx reads and never the password, so the form cannot
+// show it back. A row is sent with its hash intact, which is what makes leaving the box blank mean
+// "unchanged" rather than "no password" — dropping it would lock that user out on the next reload.
+const USER_ROW = { user: '', hash: '', password: '' }
 const upstreamRow = name => ({ name: `${name || 'app'}_backends`, algorithm: 'round_robin', healthCheck: false })
 
 const domainList = v => v.split(',').map(d => d.trim()).filter(Boolean)
@@ -386,14 +390,16 @@ function SiteEditor({ site, D, onSaved, onDeleted, onDirty }) {
           {s.basicAuth.users.map((u, i) => (
             <div className="row" key={i}>
               <input value={u.user} placeholder="username" onChange={e => setArr('basicAuth', { ...s.basicAuth, users: s.basicAuth.users.map((x, j) => j === i ? { ...x, user: e.target.value } : x) })} />
-              <input type="password" value={u.password} placeholder="password" onChange={e => setArr('basicAuth', { ...s.basicAuth, users: s.basicAuth.users.map((x, j) => j === i ? { ...x, password: e.target.value } : x) })} />
+              <input type="password" value={u.password || ''} autoComplete="new-password"
+                placeholder={u.hash ? 'password set — blank keeps it' : 'password'}
+                onChange={e => setArr('basicAuth', { ...s.basicAuth, users: s.basicAuth.users.map((x, j) => j === i ? { ...x, password: e.target.value } : x) })} />
               <Chip def={USER_ROW} value={u} title="clear this user row"
                 onUse={d => setArr('basicAuth', { ...s.basicAuth, users: s.basicAuth.users.map((x, j) => j === i ? { ...x, ...d } : x) })} />
               <Btn kind="danger" onClick={() => set({ users: s.basicAuth.users.filter((_, j) => j !== i) }, 'basicAuth')}>✕</Btn>
             </div>
           ))}
           <Btn onClick={() => set({ users: [...s.basicAuth.users, { ...USER_ROW }] }, 'basicAuth')}>+ user</Btn>
-          {!s.basicAuth.users.some(u => u.user && u.password) && (
+          {!s.basicAuth.users.some(u => u.user && (u.password || u.hash)) && (
             <p className="hint warn">Every request answers 401 until there is one row with both halves filled in — no users at all emits no auth at all, so the site would be open instead of closed.</p>
           )}
         </>}

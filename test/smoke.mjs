@@ -172,6 +172,38 @@ try {
   check('basic auth on with no users is refused',
     (await req('PUT', '/api/sites/myapp', { basicAuth: { enabled: true, users: [] } })).status === 400)
 
+  // A basic-auth password is hashed on the way in and never stored. The form has to send it, so
+  // this is the last moment it exists — and the manifest is where an operator's own reused password
+  // would otherwise sit in the clear, twenty times over, inside the undo history.
+  const pwSite = await req('PUT', '/api/sites/myapp', { basicAuth: { enabled: true, users: [{ user: 'bob', password: 'hunter2' }] } })
+  const storedRow = pwSite.body.site?.basicAuth?.users?.[0] || {}
+  check('a basic-auth password is stored as a hash, not the password',
+    pwSite.status === 200 && !!storedRow.hash && storedRow.password === undefined && !JSON.stringify(storedRow).includes('hunter2'),
+    JSON.stringify(storedRow))
+  const manifestText = fs.readFileSync(path.join(FIX, 'state', 'manifest.json'), 'utf8')
+  check('...and the password appears nowhere in the manifest file',
+    !manifestText.includes('hunter2') && manifestText.includes(storedRow.hash), storedRow.hash)
+  check('...with the hash in the file nginx reads',
+    fs.readFileSync(path.join(FIX, 'htpasswd', 'myapp'), 'utf8') === `bob:${storedRow.hash}\n`)
+
+  // Re-saving the site as the form would — password box blank, hash carried through — must keep
+  // that user's password. Dropping the hash here is how an operator silently locks a user out.
+  const resaved = await req('PUT', '/api/sites/myapp', { basicAuth: { enabled: true, users: [{ user: 'bob', hash: storedRow.hash }] } })
+  check('re-saving with the password box left blank keeps the same hash',
+    resaved.body.site?.basicAuth?.users?.[0]?.hash === storedRow.hash, JSON.stringify(resaved.body.site?.basicAuth))
+
+  // ...and typing a new one replaces it, rather than being ignored as "already set".
+  const rehashed = await req('PUT', '/api/sites/myapp', { basicAuth: { enabled: true, users: [{ user: 'bob', hash: storedRow.hash, password: 'different' }] } })
+  check('...while a typed one wins over it',
+    rehashed.body.site?.basicAuth?.users?.[0]?.hash !== storedRow.hash &&
+    !fs.readFileSync(path.join(FIX, 'state', 'manifest.json'), 'utf8').includes('different'),
+    JSON.stringify(rehashed.body.site?.basicAuth))
+
+  // Put it back off, so the conf tests further down see the site they expect.
+  await req('PUT', '/api/sites/myapp', { basicAuth: { enabled: false, users: [] } })
+  check('...and turning it off writes no auth_basic at all',
+    !fs.readFileSync(path.join(FIX, 'nginx', 'sites-available', 'myapp.conf'), 'utf8').includes('auth_basic'))
+
   // last, because it changes the conf: a proxy rule on `/` and the front controller are both
   // `location /`, and nginx refuses a duplicate — the proxy rule is the one that wins
   const rootProxy = await req('PUT', '/api/sites/myapp', { proxy: [{ path: '/', target: 'http://127.0.0.1:8080' }] })
@@ -501,6 +533,23 @@ try {
   // next restart would ignore.
   const envSecret = newSecret()
   const envPort = '3124'
+  // Seeded before boot: a manifest written by an older version, holding a basic-auth password in
+  // the clear. This is the upgrade path that matters — an operator who installed this because of
+  // that file would otherwise keep the plaintext for every site they never edit again.
+  const envState = path.join(FIX, 'state-env')
+  fs.mkdirSync(path.join(envState, 'history'), { recursive: true })
+  fs.writeFileSync(path.join(envState, 'manifest.json'), JSON.stringify({
+    sites: [{ name: 'legacy', domains: ['legacy.test'], basicAuth: { enabled: true, users: [{ user: 'old', password: 'oldsecret' }] } }],
+  }, null, 2))
+  // ...and an undo snapshot holding the manifest as it was, which the boot migration has to reach
+  // as well: hashing the live file alone leaves the plaintext behind in state/history for as long
+  // as those snapshots take to age out.
+  const oldSnap = path.join(envState, 'history', '1700000000000-abc123.json')
+  fs.writeFileSync(oldSnap, JSON.stringify({
+    at: 1700000000000,
+    label: 'a change made before the upgrade',
+    files: [{ path: path.join(envState, 'manifest.json'), content: JSON.stringify({ sites: [{ name: 'ancient', basicAuth: { enabled: true, users: [{ user: 'older', password: 'snapshot-secret' }] } }] }, null, 2), link: null }],
+  }))
   const second = spawn(process.execPath, [path.join(root, 'server.js')], {
     env: { ...env, DASH_PORT: envPort, DASH_STATE_DIR: path.join(FIX, 'state-env'), DASH_TOTP_SECRET: envSecret },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -526,6 +575,22 @@ try {
       (await envReq('POST', '/api/settings/2fa/enable', { code: '000000' })).status === 409 &&
       (await envReq('POST', '/api/settings/2fa/disable', { password: 'testpw' })).status === 409)
     check('...leaving it on', (await envReq('GET', '/api/settings')).body.totp.enabled === true)
+
+    // The boot migration, against the file this process just wrote over.
+    const migrated = fs.readFileSync(path.join(envState, 'manifest.json'), 'utf8')
+    const legacyRow = JSON.parse(migrated).sites.find(s => s.name === 'legacy')?.basicAuth?.users?.[0] || {}
+    check('a plaintext password in an existing manifest is hashed at boot',
+      !migrated.includes('oldsecret') && /^\$apr1\$/.test(legacyRow.hash || ''), JSON.stringify(legacyRow))
+    // ...and the file nginx reads was rewritten to match, so the two cannot disagree about a user.
+    check('...with the password file rewritten to the same hash',
+      fs.readFileSync(path.join(FIX, 'htpasswd', 'legacy'), 'utf8') === `old:${legacyRow.hash}\n`)
+
+    // ...including in the undo snapshots, which are the copies an operator would not think to look
+    // in. Asserted with a hash present, not merely the plaintext absent: empty would pass that too.
+    const snapText = fs.readFileSync(oldSnap, 'utf8')
+    check('...and the same is done to the manifest inside the undo history',
+      !snapText.includes('snapshot-secret') && /^\$apr1\$/.test(JSON.parse(JSON.parse(snapText).files[0].content).sites[0].basicAuth.users[0].hash || ''),
+      snapText.slice(0, 120))
   } finally {
     second.kill()
   }
