@@ -1,7 +1,13 @@
-# nginx-dashboard
+<p align="center">
+  <img src="branding/logo-banner.png" alt="NXD — NGINX DASHBOARD — observe · configure · deploy" width="640">
+</p>
 
-A web dashboard that controls NGINX entirely via buttons — no command line.
-Runs next to nginx on your Ubuntu/Debian server.
+<h1 align="center">nginx-dashboard</h1>
+
+<p align="center">
+  A web dashboard that controls NGINX entirely via buttons — no command line.<br>
+  Runs next to nginx on your Ubuntu/Debian server.
+</p>
 
 ## Modules
 
@@ -142,7 +148,13 @@ proxy rule wins and the fallback stands down.
   mistyped one cannot lock you out. `npm run totp:new` plus a line in the unit
   still works and still wins: `DASH_TOTP_SECRET` outranks anything saved in the
   panel, and while it is set the panel says so instead of offering controls that
-  would be ignored.
+  would be ignored. The sign-in form **asks** (`GET /api/login`) and draws the
+  code field only when there is a second factor to satisfy — so a box without one
+  shows a password box and nothing else. That answer is not a secret from someone
+  who can already reach the port, and the alternative — revealing the field only
+  after a refusal — would spend one of the five failures that lock an address out
+  on every legitimate sign-in. A refusal still reveals it, so a factor enrolled
+  from another session cannot leave this page asking for a password alone.
 - Binds to `127.0.0.1:7412` — reach it via SSH tunnel, or publish its own vhost.
 - **Dependencies can be updated from Settings → Updates**, checked against the
   npm registry when that tab is opened. Only the two packages the server itself

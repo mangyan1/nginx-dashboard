@@ -196,6 +196,12 @@ app.post('/api/login', (req, res) => {
   res.json({ ok: true })
 })
 
+// What the sign-in form has to ask for, before anyone has signed in. Whether this install carries a
+// second factor is not a secret worth keeping from someone who can already reach the port, and the
+// alternative — revealing the code field only after an attempt is refused — spends one of the five
+// failures that lock an address out on every legitimate sign-in.
+app.get('/api/login', (req, res) => res.json({ totp: !!TOTP_SECRET }))
+
 app.post('/api/logout', (req, res) => {
   const token = parseCookies(req)[COOKIE]
   if (token) sessions.delete(token)

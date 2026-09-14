@@ -77,7 +77,14 @@ try {
   // session exists rather than assumed to be behind the same middleware as everything else.
   check('...including the conf reader', (await req('GET', '/api/nginx-files/nxd')).status === 401)
   check('...and the updater', (await req('POST', '/api/settings/updates/apply', { name: 'express' })).status === 401)
+  // The one GET that must answer an anonymous caller: it is how the sign-in form knows whether to
+  // draw the code field at all. `false` here, with no secret in the unit and none on disk.
+  const anon = await req('GET', '/api/login')
+  check('the sign-in form can ask what it needs before signing in',
+    anon.status === 200 && anon.body.totp === false, JSON.stringify(anon.body))
   check('wrong password rejected', (await req('POST', '/api/login', { password: 'nope' })).status === 401)
+  check('...and the refusal names the password, so the form can say so',
+    (await req('POST', '/api/login', { password: 'nope' })).body.error === 'wrong password')
   check('login sets cookie', (await req('POST', '/api/login', { password: 'testpw' })).body.ok === true)
 
   // control
@@ -567,6 +574,7 @@ try {
   const kept = cookie
   cookie = ''
   check('the password alone is no longer enough', (await req('POST', '/api/login', { password: 'testpw' })).status === 401)
+  check('...and the form is told to ask for a code', (await req('GET', '/api/login')).body.totp === true)
   check('...and the refusal says which half was wrong',
     (await req('POST', '/api/login', { password: 'testpw' })).body.error === 'wrong code')
   check('the password and a code let the operator in',
@@ -624,6 +632,7 @@ try {
       (await envReq('POST', '/api/login', { password: 'testpw', code: totp(envSecret) })).body.ok === true)
     check('...and the panel reports it as owned by the unit',
       (await envReq('GET', '/api/settings')).body.totp.source === 'env')
+    check('...and the sign-in form asks for a code for it too', (await envReq('GET', '/api/login')).body.totp === true)
     check('...so enrol, enable and disable all refuse the panel rather than lying',
       (await envReq('POST', '/api/settings/2fa/begin')).status === 409 &&
       (await envReq('POST', '/api/settings/2fa/enable', { code: '000000' })).status === 409 &&

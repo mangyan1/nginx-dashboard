@@ -59,7 +59,14 @@ export async function api(method, path, body) {
     if (write) toast.err(`could not reach the dashboard — ${e.message}`)
     throw new Error(e.message)
   }
-  if (res.status === 401) { on401(); throw new Error('unauthorized') }
+  if (res.status === 401) {
+    on401()
+    // The route's own words, not a constant: `/api/login` says "wrong password" or "wrong code",
+    // and that message is the whole of what the sign-in screen has to tell the operator. On a
+    // signed-out tab it is thrown away with the screen.
+    const why = await res.json().catch(() => ({}))
+    throw new Error(why.error || 'unauthorized')
+  }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     const msg = data.error || res.statusText
