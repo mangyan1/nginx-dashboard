@@ -98,7 +98,7 @@ proxy rule wins and the fallback stands down.
   minutes (`429` + `Retry-After`). In memory, so restarting the service clears it.
 - Optional TOTP second factor (`DASH_TOTP_SECRET`, off by default). Generate one
   with `npm run totp:new` on the server and paste the line it prints into the unit.
-- Binds to `127.0.0.1:3000` — reach it via SSH tunnel, or publish its own vhost.
+- Binds to `127.0.0.1:7412` — reach it via SSH tunnel, or publish its own vhost.
 - Anyone with the password effectively has root: keep it strong.
 
 ### Reaching it from the LAN
@@ -138,7 +138,7 @@ the certificate — only produces a warning.
 browser, not the tool:
 
 ```bash
-ssh -N -L 3000:127.0.0.1:3000 user@server   # then open http://localhost:3000
+ssh -N -L 7412:127.0.0.1:7412 user@server   # then open http://localhost:7412
 ```
 
 Lost the phone with the authenticator? Remove `DASH_TOTP_SECRET` from
@@ -159,7 +159,7 @@ If you have lost the password too, set a new `DASH_PASSWORD` in the unit and res
 ```bash
 npm install
 npm run build   # build the frontend
-npm run dev     # or: Vite dev server at :5173, proxies /api to :3000
+npm run dev     # or: Vite dev server at :5173, proxies /api to :7412 (or $DASH_PORT)
 ```
 
 See `deploy/README.md` for deployment (installer script, systemd unit, dev/dry

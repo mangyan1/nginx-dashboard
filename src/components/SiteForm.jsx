@@ -196,7 +196,7 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
         {s.proxy.map((p, i) => (
           <div className="row" key={i}>
             <input value={p.path} placeholder="/api" onChange={e => setArr('proxy', s.proxy.map((x, j) => j === i ? { ...x, path: e.target.value } : x))} />
-            <input value={p.target} placeholder="http://127.0.0.1:3000" onChange={e => setArr('proxy', s.proxy.map((x, j) => j === i ? { ...x, target: e.target.value } : x))} />
+            <input value={p.target} placeholder="http://127.0.0.1:8080" onChange={e => setArr('proxy', s.proxy.map((x, j) => j === i ? { ...x, target: e.target.value } : x))} />
             <Btn kind="danger" onClick={() => setArr('proxy', s.proxy.filter((_, j) => j !== i))}>✕</Btn>
           </div>
         ))}

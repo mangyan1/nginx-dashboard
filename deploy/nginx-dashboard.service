@@ -7,7 +7,7 @@ ExecStart=/usr/bin/node /opt/nginx-dashboard/server.js
 Environment=DASH_PASSWORD=change-me
 Environment=NODE_ENV=production
 Environment=DASH_HOST=127.0.0.1
-Environment=DASH_PORT=3000
+Environment=DASH_PORT=7412
 # The vhost this dashboard manages for itself. Publishing it (Control → "Reaching this dashboard")
 # is what turns the LAN-only guards on; leave it out and no site is pinned.
 Environment=DASH_SELF_NAME=nxd

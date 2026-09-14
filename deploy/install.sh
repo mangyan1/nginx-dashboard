@@ -97,5 +97,5 @@ fi
 systemctl daemon-reload
 systemctl enable --now nginx-dashboard
 
-say "done. dashboard listens on 127.0.0.1:3000 — reach it with: ssh -L 3000:localhost:3000 <server>"
+say "done. dashboard listens on 127.0.0.1:7412 — reach it with: ssh -L 7412:localhost:7412 <server>"
 say "to reach it from another machine on the LAN, open the dashboard and use Control → 'Reaching this dashboard' → Publish: it writes a vhost bound to one LAN address and allowlisted to private ranges, then enable it under Sites."

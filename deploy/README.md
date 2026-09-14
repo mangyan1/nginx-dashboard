@@ -31,7 +31,7 @@ Everything is set in the systemd unit. The installer carries an existing
 | Variable | Default | What it does |
 |---|---|---|
 | `DASH_PASSWORD` | — | the login password; required |
-| `DASH_HOST` / `DASH_PORT` | `127.0.0.1` / `3000` | what the dashboard itself binds |
+| `DASH_HOST` / `DASH_PORT` | `127.0.0.1` / `7412` | what the dashboard itself binds |
 | `DASH_SELF_NAME` | `nxd` | name of the dashboard's own managed vhost; unset pins nothing |
 | `DASH_MAX_UPLOAD_MB` | `2048` | upload cap for the file manager, and the default for the self vhost's `client_max_body_size` |
 | `DASH_TOTP_SECRET` | unset | base32 TOTP secret; unset = password only |
@@ -42,9 +42,9 @@ scan, and the exact `Environment=` line to paste into the unit.
 
 ## Access
 
-The dashboard binds to `127.0.0.1:3000` only. Two options:
+The dashboard binds to `127.0.0.1:7412` only. Two options:
 
-- **SSH tunnel:** `ssh -L 3000:localhost:3000 server` → open http://localhost:3000
+- **SSH tunnel:** `ssh -L 7412:localhost:7412 server` → open http://localhost:7412
 - **Its own vhost (from the UI):** open the dashboard over the tunnel, then
   Control → **Reaching this dashboard** → Publish. It writes a site named
   `DASH_SELF_NAME`, bound to one LAN address you pick, allowlisted to private
@@ -61,8 +61,8 @@ Control tab. Doing it by hand is possible but the name has to match
 ## If you lock yourself out
 
 The dashboard does not depend on nginx: it is still listening on `DASH_HOST:DASH_PORT`
-whatever the vhost says. `ssh -N -L 3000:127.0.0.1:3000 user@server` and open
-http://localhost:3000. From there, Control → **Reaching this dashboard** fixes it: it
+whatever the vhost says. `ssh -N -L 7412:127.0.0.1:7412 user@server` and open
+http://localhost:7412. From there, Control → **Reaching this dashboard** fixes it: it
 rewrites `/etc/nginx/sites-available/$DASH_SELF_NAME.conf` from what the dashboard has
 saved, which is also what happens by itself at the next write or on restart if the file
 was deleted by hand. **Repair it now** is for when the file and its `sites-enabled` entry

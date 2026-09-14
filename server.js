@@ -18,7 +18,7 @@ import { b32decode, totpValid } from './lib/totp.js'
 
 // Number(), not the raw string: every comparison against this port is numeric, and a string
 // would make each one false — the self-vhost check included.
-const PORT = Number(process.env.DASH_PORT) || 3000
+const PORT = Number(process.env.DASH_PORT) || 7412
 const HOST = process.env.DASH_HOST || '127.0.0.1'
 const PASSWORD = process.env.DASH_PASSWORD
 const DRY = process.env.DASH_DRY === '1' // dev mode: write files, skip nginx -t / reload / systemctl / certbot

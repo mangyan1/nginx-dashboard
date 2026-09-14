@@ -10,7 +10,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const API = 'http://127.0.0.1:3000'
+const API = 'http://127.0.0.1:7412'
 const AVAIL = '/etc/nginx/sites-available'
 const MANIFEST = '/var/lib/nginx-dashboard/manifest.json'
 
@@ -230,7 +230,7 @@ try {
   const selfPub = await req('POST', '/api/sites', {
     name: 'nxd', domains: ['nxd.test'],
     ipRules: { mode: 'allowlist', ips: ['127.0.0.1/32', '::1/128'] },
-    proxy: [{ path: '/', target: 'http://127.0.0.1:3000' }],
+    proxy: [{ path: '/', target: 'http://127.0.0.1:7412' }],
     rateLimit: { enabled: true, rps: 30, burst: 60 },
   })
   check('the dashboard publishes its own vhost', selfPub.status === 200, JSON.stringify(selfPub.body))
