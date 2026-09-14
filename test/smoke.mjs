@@ -309,6 +309,68 @@ try {
   check('a slashed history id is not even a route',
     (await req('POST', '/api/history/../../manifest.json/revert')).status === 404)
 
+  // ---- the dashboard's own vhost: what happens when a shell command deletes it ----
+  // `sites-enabled/nxd.conf` is a symlink into sites-available, and `nginx -t` fails on a dangling
+  // include — so one `rm` refuses every write on the box, including the one that would repair it.
+  const enNxd = path.join(FIX, 'nginx', 'sites-enabled', 'nxd.conf')
+  const selfBefore = fs.readFileSync(selfConf, 'utf8')
+  // something unrelated to save, for the checks that a write which has nothing to do with the
+  // dashboard's own vhost still puts it back
+  check('a bystander site exists to save',
+    (await req('POST', '/api/sites', { name: 'bystander', domains: ['bystander.test'], root: path.join(FIX, 'www', 'bystander') })).status === 200)
+
+  fs.rmSync(selfConf, { force: true })
+  const dangling = (await req('GET', '/api/sites')).body.sites.find(s => s.name === 'nxd')
+  check('a hand-deleted conf reads as enabled-but-missing, not disabled',
+    dangling.enabled === true && dangling.drift === 'missing', JSON.stringify(dangling))
+
+  // the save that used to be impossible: the guard read the dangling entry as "disabled" and
+  // refused before apply was ever reached, which is what left this state with no way out
+  const saveIt = await req('PUT', '/api/sites/nxd', (await req('GET', '/api/sites/nxd')).body.site)
+  check('the self vhost can be saved while its conf is missing', saveIt.status === 200, JSON.stringify(saveIt.body))
+  check('...and the conf is back byte-for-byte', fs.readFileSync(selfConf, 'utf8') === selfBefore)
+
+  // any write heals it, not only its own
+  fs.rmSync(selfConf, { force: true })
+  const otherSave = await req('PUT', '/api/sites/bystander', { domains: ['bystander.test'] })
+  check('an unrelated save repairs it too', otherSave.status === 200, JSON.stringify(otherSave.body))
+  check('...restoring the conf byte-for-byte', fs.readFileSync(selfConf, 'utf8') === selfBefore)
+  check('...leaving its symlink alone', fs.existsSync(enNxd))
+  check('...and the API reports the rewrite', (await req('GET', '/api/sites')).body.selfRepair?.ok === true)
+
+  // no trace, no heal: a vhost deliberately taken out of sites-enabled stays out of it, and one
+  // that never existed is never created — publishing the dashboard on the LAN is not a side effect
+  fs.rmSync(selfConf, { force: true })
+  fs.rmSync(enNxd, { force: true })
+  const afterUnpublish = await req('PUT', '/api/sites/bystander', { domains: ['bystander.test'] })
+  check('with the entry gone too, a write does not resurrect the vhost',
+    afterUnpublish.status === 200 && !fs.existsSync(selfConf), JSON.stringify(afterUnpublish.body))
+
+  // the one state no trace heals, and the only thing that can reach it
+  check('repair is refused for a site that is not this dashboard',
+    (await req('POST', '/api/sites/bystander/repair')).status === 403)
+  const repaired = await req('POST', '/api/sites/nxd/repair')
+  check('repair writes the missing conf back', repaired.status === 200, JSON.stringify(repaired.body))
+  check('...byte-for-byte', fs.readFileSync(selfConf, 'utf8') === selfBefore)
+  check('...without enabling it', !fs.existsSync(enNxd))
+  check('...so enabling after a repair works', (await req('POST', '/api/sites/nxd/enable')).status === 200)
+  check('...and it is linked again', fs.existsSync(enNxd))
+  check('repair on a conf that is on disk is refused', (await req('POST', '/api/sites/nxd/repair')).status === 400)
+
+  // A repair must leave no undo entry behind — its snapshot's "before" is a file that did not
+  // exist, and replaying that would delete the conf it just wrote. History is written by safeApply,
+  // which DRY mode never reaches, so that one is asserted in test/e2e.mjs instead.
+
+  // a lost manifest entry is unmanaged, not adopted: /repair only rewrites a conf it can find in
+  // the manifest, and Publish is the click that takes it back
+  const mPath = path.join(FIX, 'state', 'manifest.json')
+  const mLive = JSON.parse(fs.readFileSync(mPath, 'utf8'))
+  fs.writeFileSync(mPath, JSON.stringify({ sites: mLive.sites.filter(s => s.name !== 'nxd') }))
+  check('with the manifest entry gone it is on disk and unmanaged',
+    !!(await req('GET', '/api/sites')).body.sites.find(s => s.name === 'nxd' && !s.managed))
+  check('...so repair has nothing to write it from', (await req('POST', '/api/sites/nxd/repair')).status === 404)
+  fs.writeFileSync(mPath, JSON.stringify(mLive))
+
   // last: five wrong passwords lock the address out, so nothing may need to log in after this
   for (let i = 0; i < 5; i++) await req('POST', '/api/login', { password: 'nope' })
   const locked = await req('POST', '/api/login', { password: 'testpw' })

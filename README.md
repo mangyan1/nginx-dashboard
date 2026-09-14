@@ -106,13 +106,24 @@ proxy rule wins and the fallback stands down.
 This dashboard is the LAN-only tool; the sites it manages are the WAN-facing part.
 Control → **Reaching this dashboard** writes a vhost for the dashboard itself,
 prefilled to bind one specific LAN address, allow to private ranges only, rate
-limit, and proxy `/` back at this process. It is created disabled — enable it under
-Sites, which is also where it gets a certificate.
+limit, and proxy `/` back at this process. One click publishes *and* enables it;
+**Manage** opens it as the same editor form, which is where it gets a certificate.
+
+It is not listed under Sites — it is not one of the sites you serve, so it stays out
+of that list and its count and lives on the Control tab instead.
 
 That site is pinned by `DASH_SELF_NAME`: the dashboard recognises its own vhost and
 **refuses to disable or delete it**. Publishing it is what turns the guards on; with
 the variable unset nothing is pinned, so an existing install cannot become
 undeletable just by upgrading.
+
+It also puts itself back. `sites-enabled/*` is a bare glob, so a conf deleted by hand
+leaves a dangling entry that fails `nginx -t` — which would refuse *every* save on
+*every* site. The dashboard notices its own conf is gone at the next write and on
+restart, and rewrites it from what it has saved; that rewrite is not an operator
+action, so it stays out of the undo history. A vhost you unpublished on purpose has no
+entry left and is never resurrected — Control offers **Repair it now** for that case
+instead, and only ever for the pinned name.
 
 Every save of it is still validated — a change that would stop `/` reaching this
 process is refused before anything is written, including one that leaves it
@@ -134,10 +145,14 @@ Lost the phone with the authenticator? Remove `DASH_TOTP_SECRET` from
 `/etc/systemd/system/nginx-dashboard.service`, `systemctl daemon-reload &&
 systemctl restart nginx-dashboard`. Login falls back to password only.
 
-Locked out by the vhost's allowlist or a bad `listen`? The same route works, and the
-offending file is `/etc/nginx/sites-available/<DASH_SELF_NAME>.conf` — edit it there
-or fix it in the UI over the tunnel. If you have lost the password too, set a new
-`DASH_PASSWORD` in the unit and restart.
+Locked out by the vhost's allowlist or a bad `listen`? The same route works. Fix it in
+the UI over the tunnel — over the tunnel `req.ip` is loopback, so the allowlist cannot
+lock you out of your own repair. Control → **Reaching this dashboard** saves it, or
+**Repair it now** if the file is missing entirely — but note that Save rewrites the conf
+from what the dashboard has saved, so a hand-edit made over SSH is lost the next time it
+is saved from the UI.
+
+If you have lost the password too, set a new `DASH_PASSWORD` in the unit and restart.
 
 ## Dev & deploy
 

@@ -16,13 +16,15 @@ const CONFIRM = {
 const LAN_RANGES = ['127.0.0.1/32', '::1/128', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', 'fc00::/7', 'fe80::/10']
 
 /**
- * Publishing the dashboard's own vhost — the one thing the Sites module cannot do for itself,
- * because the site has to be named exactly what the server pins (DASH_SELF_NAME) or the guards
- * do not recognise it. Getting that name wrong by hand fails silently, which is why the button
- * exists: it is the same prefill every time, including the parts that are easy to leave out.
+ * The dashboard's own vhost — the one thing the Sites module cannot do for itself, because the site
+ * has to be named exactly what the server pins (DASH_SELF_NAME) or the guards do not recognise it.
+ * Getting that name wrong by hand fails silently, which is why the button exists.
+ *
+ * It is also the only place it can be reached from now that Sites lists only the sites you serve,
+ * so every state has to be resolvable from here: not published, published but broken, and fine.
  */
-function Access({ status }) {
-  const [has, setHas] = useState(null) // is the self vhost already a managed site?
+function Access({ status, onOpenSite }) {
+  const [sites, setSites] = useState(null) // null = not loaded yet
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
   const [addr, setAddr] = useState('')
@@ -33,14 +35,20 @@ function Access({ status }) {
   const bindAddr = addr || addrs[0]?.address || ''
 
   useEffect(() => {
-    if (!self) { setHas(false); return }
-    api('GET', '/api/sites')
-      .then(r => setHas(r.sites.some(s => s.name === self)))
-      .catch(() => setHas(null))
+    if (!self) return
+    api('GET', '/api/sites').then(setSites).catch(() => setSites(null))
   }, [self, result])
+
+  const row = sites?.sites.find(s => s.name === self)
+  const managed = !!row?.managed
+  // the conf is gone from sites-available while its entry stays in sites-enabled: nginx fails on
+  // the dangling include, so *every* write on the box is refused until it is back
+  const broken = managed && row.drift === 'missing'
+  const unmanaged = !!row && !row.managed
 
   const publish = async () => {
     setBusy(true)
+    setResult(null)
     try {
       const r = await api('POST', '/api/sites', {
         name: self,
@@ -53,13 +61,46 @@ function Access({ status }) {
         ipRules: { mode: 'allowlist', ips: LAN_RANGES },
         rateLimit: { enabled: true, rps: 30, burst: 60 },
       })
+      // Enable in the same click: a site is created disabled, and "now go and click Enable on the
+      // Sites tab" stopped being true the moment the vhost was hidden from it
+      await api('POST', `/api/sites/${self}/enable`)
       setResult({
         ok: true,
-        output: `created "${r.site.name}" — it is written but not enabled yet. Open it under Sites and click Enable to put it live.`
+        output: `published "${self}" on ${bindAddr} and enabled it. Manage opens it as a form, where it can take a certificate or be changed.`
           + (r.warnings?.length ? `\n\nworth a look:\n` + r.warnings.map(w => `  ! ${w}`).join('\n') : ''),
       })
     } catch (e) { setResult({ ok: false, output: e.message }) } finally { setBusy(false) }
   }
+
+  const repair = async () => {
+    setBusy(true)
+    setResult(null)
+    try {
+      await api('POST', `/api/sites/${self}/repair`)
+      setResult({ ok: true, output: `rewrote ${self}.conf from what this dashboard has saved for it.` })
+    } catch (e) { setResult({ ok: false, output: e.message }) } finally { setBusy(false) }
+  }
+
+  const enable = async () => {
+    setBusy(true)
+    setResult(null)
+    try {
+      await api('POST', `/api/sites/${self}/enable`)
+      setResult({ ok: true, output: `${self} is enabled — nginx is serving this dashboard through it again.` })
+    } catch (e) { setResult({ ok: false, output: e.message }) } finally { setBusy(false) }
+  }
+
+  const fields = <>
+    <Field label="Bind to address">
+      <select value={bindAddr} onChange={e => setAddr(e.target.value)}>
+        {!addrs.length && <option value="">(no non-loopback address found)</option>}
+        {addrs.map(a => <option key={a.address} value={a.address}>{a.address}  (IPv{a.family})</option>)}
+      </select>
+    </Field>
+    <Field label="Domains (comma-separated, optional)">
+      <input value={domain} onChange={e => setDomain(e.target.value)} placeholder="dash.example.com — or leave blank and use the IP" />
+    </Field>
+  </>
 
   return (
     <section className="panel">
@@ -84,33 +125,77 @@ function Access({ status }) {
           </p>
         )}
 
-        {self && has === false && <>
+        {self && !sites && <p className="sub">…</p>}
+
+        {self && sites && !row && <>
           <p className="sub">
-            Publish a vhost for this dashboard: bound to one LAN address, allowlisted to private
-            ranges only, rate limited, and proxying <code>/</code> back to this process. It is
-            created disabled — Enable it on the Sites tab, which is also where it gets a TLS
-            certificate.
+            No vhost serves this dashboard yet. Publishing one binds it to a single LAN address,
+            allowlists private ranges only, rate limits it, and proxies <code>/</code> back to this
+            process — then nginx serves this dashboard on <b>{bindAddr || 'that address'}</b>.
           </p>
-          <Field label="Bind to address">
-            <select value={bindAddr} onChange={e => setAddr(e.target.value)}>
-              {!addrs.length && <option value="">(no non-loopback address found)</option>}
-              {addrs.map(a => <option key={a.address} value={a.address}>{a.address}  (IPv{a.family})</option>)}
-            </select>
-          </Field>
-          <Field label="Domains (comma-separated, optional)">
-            <input value={domain} onChange={e => setDomain(e.target.value)} placeholder="dash.example.com — or leave blank and use the IP" />
-          </Field>
+          {fields}
           <div className="actions">
             <Btn kind="primary" disabled={busy || !bindAddr} onClick={publish}>{busy ? '…' : `Publish as "${self}"`}</Btn>
           </div>
         </>}
 
-        {self && has === true && (
+        {self && unmanaged && <>
           <p className="sub">
-            <b>{self}</b> is published and pinned: it is listed under Sites with a <em>self</em> badge,
-            deleting or disabling it is refused, and every save of it is checked to still point back
-            at this process.
+            <b>{self}.conf</b> is on disk but not in the manifest, so nothing is guarding it — it can
+            be disabled or deleted like any other site. Publishing takes it back as a managed site,
+            which rewrites the conf from the settings below.
           </p>
+          {fields}
+          <div className="actions">
+            <Btn kind="primary" disabled={busy || !bindAddr} onClick={publish}>{busy ? '…' : 'Take it back'}</Btn>
+          </div>
+        </>}
+
+        {self && broken && <>
+          <div className="mb"><span className="chip warn">conf missing</span></div>
+          <p className="sub">
+            <b>{self}.conf</b> is gone from sites-available while its entry is still in
+            sites-enabled. nginx fails on the dangling include, so every save on every site is
+            refused until it is back — the dashboard rewrites it by itself the next time anything
+            changes, or now:
+          </p>
+          <div className="actions">
+            <Btn kind="primary" disabled={busy} onClick={repair}>{busy ? '…' : 'Repair it now'}</Btn>
+            <Btn disabled={busy} onClick={() => onOpenSite?.(self)}>Manage</Btn>
+          </div>
+        </>}
+
+        {self && managed && !broken && !row.enabled && <>
+          <div className="mb"><span className="chip off">disabled</span></div>
+          <p className="sub">
+            <b>{self}</b> is saved but not enabled, so nginx is not serving this dashboard through
+            it — you are reaching it on {status?.host}:{status?.port} directly.
+          </p>
+          <div className="actions">
+            <Btn kind="primary" disabled={busy} onClick={enable}>{busy ? '…' : 'Enable it'}</Btn>
+            <Btn disabled={busy} onClick={() => onOpenSite?.(self)}>Manage</Btn>
+          </div>
+        </>}
+
+        {self && managed && !broken && row.enabled && <>
+          <p className="sub">
+            <b>{self}</b> is published and pinned, and nginx is serving this dashboard through it.
+            Disabling or deleting it is refused, and every save of it is checked to still point back
+            at this process. It is not listed under Sites — it is not one of the sites you serve.
+          </p>
+          <div className="actions">
+            <Btn onClick={() => onOpenSite?.(self)}>Manage</Btn>
+          </div>
+        </>}
+
+        {sites?.selfRepair && !sites.selfRepair.ok && (
+          <div className="mb">
+            <span className="chip warn">rewrite refused</span>
+            <p className="sub">
+              The dashboard found its own conf missing and nginx refused the rewritten one:
+              <br /><code>{sites.selfRepair.output}</code>
+            </p>
+          </div>
         )}
 
         <Out result={result} />
@@ -119,7 +204,7 @@ function Access({ status }) {
   )
 }
 
-export default function Control({ status, onStatus }) {
+export default function Control({ status, onStatus, onOpenSite }) {
   const [result, setResult] = useState(null)
   const [run, busy] = useAsync(async action => {
     setResult(await api('POST', `/api/nginx/${action}`))
@@ -173,7 +258,7 @@ export default function Control({ status, onStatus }) {
         </section>
       )}
 
-      <Access status={status} />
+      <Access status={status} onOpenSite={onOpenSite} />
     </div>
   )
 }

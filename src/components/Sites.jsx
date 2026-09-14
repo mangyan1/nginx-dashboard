@@ -11,7 +11,7 @@ const subtitle = s => {
   return `${names || 'any name'}  :${s.port}`
 }
 
-export default function Sites({ onDirty }) {
+export default function Sites({ onDirty, openSite, onOpened }) {
   const [sites, setSites] = useState(null)
   const [drift, setDrift] = useState(false) // the shared http-context file differs from the manifest
   const [selected, setSelected] = useState(null) // site name or 'new'
@@ -24,6 +24,12 @@ export default function Sites({ onDirty }) {
   useEffect(() => { load() }, [])
   // leaving the module disarms the app-level guard; the form is gone, nothing left to lose
   useEffect(() => () => onDirty?.(false), [])
+  // Control asked for the dashboard's own vhost; it is here in `sites` even though it is not listed
+  useEffect(() => {
+    if (!openSite) return
+    setSelected(openSite)
+    onOpened?.()
+  }, [openSite])
 
   // Selecting unmounts the form and every edit in it. Ask first rather than lose them.
   const select = name => {
@@ -37,6 +43,9 @@ export default function Sites({ onDirty }) {
 
   const creating = selected === 'new'
   const site = !creating && selected ? sites.find(s => s.name === selected) : null
+  // The dashboard's own vhost stays in `sites` — the form looks its config up from there — but it
+  // is not one of the sites you serve, so it is not listed, not counted, and not the empty state.
+  const listed = sites.filter(s => !s.self)
 
   return (
     <div className="sites">
@@ -44,7 +53,7 @@ export default function Sites({ onDirty }) {
         <div className="panel-head">
           <span className="panel-title">Sites</span>
           <span className="spacer" />
-          <span className="chip">{sites.length}</span>
+          <span className="chip">{listed.length}</span>
         </div>
         <div className="panel-body">
           {drift && (
@@ -53,7 +62,7 @@ export default function Sites({ onDirty }) {
             </div>
           )}
           <ul>
-            {sites.map(s => (
+            {listed.map(s => (
               <li key={s.name} className={selected === s.name ? 'active' : ''} onClick={() => select(s.name)}>
                 <span className={`dot ${s.drift ? 'warn' : s.enabled ? '' : 'idle'}`} />
                 <span className="col">
@@ -61,14 +70,19 @@ export default function Sites({ onDirty }) {
                   <span className="site-dom">{subtitle(s)}</span>
                 </span>
                 <span className="badges">
-                  {s.self && <em className="chip self" title="the vhost this dashboard is reached through — cannot be disabled or deleted">self</em>}
                   {s.drift && <em className="chip warn" title={`the conf file is ${s.drift} — saving from here rewrites it`}>{s.drift}</em>}
                   {!s.managed && <em className="chip un">unmanaged</em>}
                   {s.managed && <em className={`chip ${s.enabled ? 'ok' : 'off'}`}>{s.enabled ? 'on' : 'off'}</em>}
                 </span>
               </li>
             ))}
-            {!sites.length && <li className="none">no sites yet</li>}
+            {!listed.length && (
+              <li className="none">
+                {sites.some(s => s.self)
+                  ? 'no sites yet — the dashboard\'s own vhost lives on the Control tab'
+                  : 'no sites yet'}
+              </li>
+            )}
           </ul>
           <Btn kind="primary" onClick={() => select('new')}>+ New site</Btn>
         </div>

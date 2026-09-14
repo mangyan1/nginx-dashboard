@@ -24,6 +24,9 @@ export default function App() {
   const [status, setStatus] = useState(null)
   const [dirty, setDirty] = useState(false) // a site form has unsaved edits
   const [theme, setTheme] = useState(readTheme)
+  // The dashboard's own vhost is not in the Sites list, so Control has to be able to open it there.
+  // Cleared by Sites once it has selected the name, so clicking Manage again works a second time.
+  const [openSite, setOpenSite] = useState(null)
 
   const probe = () => api('GET', '/api/status')
     .then(s => { setStatus(s); setAuthed(true) })
@@ -51,6 +54,13 @@ export default function App() {
     setDirty(false)
     setTab(t)
     location.hash = t
+  }
+
+  const openSiteIn = name => {
+    setOpenSite(name)
+    setDirty(false)
+    setTab('sites')
+    location.hash = 'sites'
   }
 
   const pick = t => {
@@ -108,8 +118,8 @@ export default function App() {
           </div>
         </aside>
         <main className="main">
-          {tab === 'control' && <Control status={status} onStatus={probe} />}
-          {tab === 'sites' && <Sites onDirty={setDirty} />}
+          {tab === 'control' && <Control status={status} onStatus={probe} onOpenSite={openSiteIn} />}
+          {tab === 'sites' && <Sites onDirty={setDirty} openSite={openSite} onOpened={() => setOpenSite(null)} />}
           {tab === 'logs' && <Logs />}
           {tab === 'metrics' && <Metrics status={status} theme={theme} />}
         </main>

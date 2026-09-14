@@ -73,19 +73,25 @@ const masterPid = () => { try { return Number(fs.readFileSync('/run/nginx.pid', 
 const alive = pid => { if (!pid) return false; try { process.kill(pid, 0); return true } catch { return false } }
 sh('nginx', alive(masterPid()) ? ['-s', 'reload'] : []) // reload the wipe in; -s reload needs a master
 
-const server = spawn(process.execPath, [path.join(root, 'server.js')], {
-  env: { ...process.env, DASH_PASSWORD: 'e2epw', DASH_SELF_NAME: 'nxd' }, // no DASH_DRY: real nginx -t and reload
-  stdio: ['ignore', 'pipe', 'pipe'],
-})
 let serverLog = ''
-server.stdout.on('data', d => { serverLog += d })
-server.stderr.on('data', d => { serverLog += d })
-
-try {
+let bootLog = '' // this process's output alone, so a restart can be told apart from the first boot
+let server
+const startServer = async () => {
+  bootLog = ''
+  server = spawn(process.execPath, [path.join(root, 'server.js')], {
+    env: { ...process.env, DASH_PASSWORD: 'e2epw', DASH_SELF_NAME: 'nxd' }, // no DASH_DRY: real nginx -t and reload
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  server.stdout.on('data', d => { serverLog += d; bootLog += d })
+  server.stderr.on('data', d => { serverLog += d; bootLog += d })
   await new Promise(r => {
-    const t = setInterval(() => { if (serverLog.includes('nginx-dashboard on')) { clearInterval(t); r() } }, 100)
+    const t = setInterval(() => { if (bootLog.includes('nginx-dashboard on')) { clearInterval(t); r() } }, 100)
     setTimeout(() => { clearInterval(t); r() }, 15_000)
   })
+}
+
+try {
+  await startServer()
   check('server booted in real (non-dry) mode', serverLog.includes('dry=false'), serverLog.slice(0, 200))
 
   // ---- auth ----
@@ -235,12 +241,14 @@ try {
   check('enabling it is not', (await req('POST', '/api/sites/nxd/enable')).status === 200)
   // /api/status rather than /: the shell is served either way, but a proxied API call is the part
   // that breaks when the proxy rule is wrong, and 401 from *our* process is the proof it arrived.
-  let dashThroughVhost = false
-  for (let i = 0; i < 50 && !dashThroughVhost; i++) {
-    dashThroughVhost = viaNginx('nxd.test', '/api/status').includes('unauthorized')
-    if (!dashThroughVhost) await new Promise(r => setTimeout(r, 100))
+  const pollApi = async (want = true) => {
+    for (let i = 0; i < 50; i++) {
+      if (viaNginx('nxd.test', '/api/status').includes('unauthorized') === want) return true
+      await new Promise(r => setTimeout(r, 100))
+    }
+    return false
   }
-  check('nginx serves the dashboard through its own vhost', dashThroughVhost,
+  check('nginx serves the dashboard through its own vhost', await pollApi(),
     JSON.stringify(viaNginx('nxd.test', '/api/status').slice(0, 120)))
 
   // The buffering fix, proven rather than asserted: with proxy_buffering at nginx's default the
@@ -257,6 +265,75 @@ try {
     through.includes('through-the-proxy-canary'), JSON.stringify(through.slice(-200)))
   tailer.kill('SIGKILL')
 
+  // ---- what a shell command can do to it, and what puts it back ----
+  // The premise everything below rests on, so prove it rather than assume it: `include
+  // /etc/nginx/sites-enabled/*` is a bare glob, so it matches a link whose target is gone.
+  const selfConf = path.join(AVAIL, 'nxd.conf')
+  const selfLink = '/etc/nginx/sites-enabled/nxd.conf'
+  const selfText = read(selfConf)
+  fs.rmSync(selfConf, { force: true })
+  check('deleting the conf by hand really does break nginx -t', !sh('nginx', ['-t']).ok,
+    sh('nginx', ['-t']).out.slice(-200))
+
+  // Every write on the box is refused while that dangling include is there, so any save has to put
+  // it back — otherwise the whole Sites module is read-only until somebody finds the server.
+  const histBefore = (await req('GET', '/api/history')).body.entries.length
+  const twinSave = await req('PUT', '/api/sites/twin', { domains: ['twin.test'] })
+  check('an unrelated save repairs the deleted conf', twinSave.status === 200, JSON.stringify(twinSave.body))
+  check('...byte-for-byte', read(selfConf) === selfText)
+  check('...with nginx -t passing again', sh('nginx', ['-t']).ok)
+  check('...leaving its symlink alone', fs.existsSync(selfLink))
+  check('...and the dashboard still served through it', await pollApi())
+
+  // A repair is not an operator change, so it leaves nothing to undo — its snapshot's "before" is
+  // a file that did not exist, and replaying that would delete the conf it just wrote.
+  const histAfter = (await req('GET', '/api/history')).body.entries
+  check('...and adds no history entry of its own', histAfter.length === histBefore + 1,
+    `${histBefore} -> ${histAfter.length}`)
+  check('...the one new entry being the save that triggered it', histAfter[0]?.label === 'update site twin',
+    JSON.stringify(histAfter[0]?.label))
+
+  // The save that used to be refused: the guard read the dangling entry as "disabled" and rejected
+  // it before apply, which left this state with no way out through the UI at all.
+  fs.rmSync(selfConf, { force: true })
+  const selfSave = await req('PUT', '/api/sites/nxd', (await req('GET', '/api/sites/nxd')).body.site)
+  check('the self vhost can be saved while its conf is missing', selfSave.status === 200, JSON.stringify(selfSave.body))
+  check('...restoring it byte-for-byte', read(selfConf) === selfText)
+
+  // The same root cause on a site that is not this dashboard, and a worse ending: safeApply links a
+  // *disabled* site's conf in for `nginx -t` and then deletes whatever it linked, so a dangling
+  // entry read as absent made it delete the operator's real symlink. The save returned 200 and the
+  // site quietly stopped serving.
+  fs.rmSync(path.join(AVAIL, 'myapp.conf'), { force: true })
+  const orphan = await req('PUT', '/api/sites/myapp', { domains: ['myapp.test'] })
+  check('an ordinary site whose conf was hand-deleted saves', orphan.status === 200, JSON.stringify(orphan.body))
+  check('...and keeps its symlink', fs.existsSync('/etc/nginx/sites-enabled/myapp.conf'))
+  check('...so it is still served', await serves('myapp.test', 'myapp.test'))
+
+  // No trace, no heal: a vhost taken out of sites-enabled on purpose stays out, and one that never
+  // existed is never created — publishing the dashboard on the LAN is not a side effect of a save.
+  fs.rmSync(selfConf, { force: true })
+  fs.rmSync(selfLink, { force: true })
+  const untraced = await req('PUT', '/api/sites/twin', { domains: ['twin.test'] })
+  check('with the entry gone too, a write does not resurrect the vhost',
+    untraced.status === 200 && !fs.existsSync(selfConf), JSON.stringify(untraced.body))
+
+  // ...which leaves the explicit path, for the state nothing on disk can speak for
+  check('repair is refused for a site that is not this dashboard',
+    (await req('POST', '/api/sites/myapp/repair')).status === 403)
+  const repaired = await req('POST', '/api/sites/nxd/repair')
+  check('repair writes the missing conf back', repaired.status === 200, JSON.stringify(repaired.body))
+  check('...byte-for-byte', read(selfConf) === selfText)
+  check('...without enabling it', !fs.existsSync(selfLink))
+  check('...so enabling it afterwards works', (await req('POST', '/api/sites/nxd/enable')).status === 200)
+  check('...and nginx serves the dashboard through it again', await pollApi())
+  check('repair on a conf that is on disk is refused', (await req('POST', '/api/sites/nxd/repair')).status === 400)
+  const hBeforeRepair = (await req('GET', '/api/history')).body.entries.length
+  fs.rmSync(selfConf, { force: true })
+  await req('POST', '/api/sites/nxd/repair')
+  check('nor does the repair button add one',
+    (await req('GET', '/api/history')).body.entries.length === hBeforeRepair)
+
   // ---- module 6: metrics from a real stub_status ----
   const m = await req('GET', '/api/metrics')
   check('stub_status reachable', m.status === 200, JSON.stringify(m.body))
@@ -272,6 +349,17 @@ try {
   check('conf gone from disk', !fs.existsSync(path.join(AVAIL, 'myapp.conf')))
   check('site no longer served', await serves('myapp.test', 'myapp.test', false))
   check('nginx -t passes at the end', sh('nginx', ['-t']).ok)
+
+  // ---- and a restart on its own is enough ----
+  // selfRepair runs on the way up too, so the recovery does not wait for somebody to happen to save
+  // something first. Last in the file: it replaces the process and the in-memory session with it.
+  fs.rmSync(selfConf, { force: true })
+  server.kill('SIGKILL')
+  await startServer()
+  check('the deleted conf is back after a restart, with no other write',
+    read(selfConf) === selfText, JSON.stringify(read(selfConf)?.slice(0, 120)))
+  check('...nginx is serving the dashboard through it', await pollApi())
+  check('...and nginx -t passes', sh('nginx', ['-t']).ok)
 } finally {
   server.kill('SIGKILL')
 }

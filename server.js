@@ -47,7 +47,8 @@ const SELF_RECOVERY = [
   `You are not locked out: nginx serves the websites, but this dashboard is its own process and`,
   `is still listening on ${HOST}:${PORT}.`,
   `  from your machine:  ssh -N -L ${PORT}:${HOST}:${PORT} you@server   then open http://localhost:${PORT}`,
-  `  on the server:      fix or move /etc/nginx/sites-available/${SELF_NAME}.conf, then nginx -t && nginx -s reload`,
+  `  the vhost itself:   Control → "Reaching this dashboard" repairs it, and the dashboard rewrites`,
+  `                      ${SELF_NAME ? `sites-available/${SELF_NAME}.conf` : 'its own conf'} by itself the next time anything changes`,
 ].join('\n')
 
 mkdirs()
@@ -155,14 +156,52 @@ app.post('/api/logout', (req, res) => {
 app.use('/api', requireAuth)
 
 // DRY mode: write files but skip nginx -t / reload
-const apply = (...a) => (DRY
-  ? (safeApplyDry(...a))
-  : safeApply(...a))
+// Every write first gives the dashboard's own vhost a chance to put itself back; see selfRepair.
+const apply = async (...a) => {
+  await selfRepair()
+  return DRY ? safeApplyDry(...a) : safeApply(...a)
+}
 function safeApplyDry(files, mutate) {
   try {
     mutate()
     return { ok: true, output: 'dry mode: written without nginx -t' }
   } catch (e) { return { ok: false, output: e.message } }
+}
+
+// The most recent selfRepair, so the UI can say so when the dashboard rewrote its own conf — and
+// say why when it could not. Reset per process; the journal has the full story.
+let lastSelfRepair = null
+
+/**
+ * The dashboard's own vhost, put back after a shell command removed its conf.
+ *
+ * `sites-enabled/<self>.conf` is a symlink into sites-available, and `nginx -t` fails on a dangling
+ * include — so one `rm` refuses every write to every site, including the one that would repair it.
+ * That is the whole reason this exists, and it runs before every write for no other reason.
+ *
+ * Gated on a live trace — the entry is still in sites-enabled. A vhost that was deliberately
+ * unpublished has no entry, and re-creating it would put the dashboard back on the LAN unasked. A
+ * conf that exists but was edited by hand is drift of the other kind and is left alone.
+ *
+ * Its own transaction, never the caller's, so it cannot clobber what the caller is about to write
+ * (/selfsigned renders from the same manifest, writes second, and wins) — and so that a failure
+ * here is logged rather than turning an unrelated save into a 422.
+ */
+async function selfRepair() {
+  if (!SELF_NAME) return null
+  const m = readManifest()
+  const site = m.sites.find(s => isSelf(s.name))
+  if (!site || !linkExists(site.name) || fs.existsSync(siteConfPath(site.name))) return null
+  // `enabled: true` because the entry exists and this write is what makes it resolve again. Never
+  // write a conf already known to be bad: nginx -t is the real check, but there is no reason to
+  // hand it something the guards already reject.
+  if (selfSiteErrors(site, { host: HOST, port: PORT, enabled: true }).length) return null
+  // The primitive, not `apply` — that would call this again.
+  const result = await (DRY ? safeApplyDry : safeApply)(siteFiles(site.name), () => writeSiteFiles(site, m),
+    { label: `rewrite ${site.name}.conf`, record: false })
+  lastSelfRepair = { ok: result.ok, output: result.output, at: new Date().toISOString() }
+  if (!result.ok) console.error(`self-repair of ${site.name}.conf failed: ${result.output}`)
+  return result
 }
 
 // ---------- module 1: server control ----------
@@ -208,8 +247,27 @@ app.post('/api/nginx/:action', async (req, res) => {
 })
 
 // ---------- modules 2-5: sites ----------
+/**
+ * Whether the site's symlink is in sites-enabled — the *entry*, not whether its target resolves.
+ * `fs.existsSync` follows the link, so a dangling one (the conf was deleted by hand) reads as
+ * "not there", and every reading that mistake produces is wrong: the site is reported disabled
+ * while nginx is failing on it, testLinkFor decides it may link that path in — which makes safeApply
+ * delete the operator's real symlink on the way out — and a save that would repair it is refused
+ * for leaving the site disabled. `lstat` is the fix for all four.
+ */
+function linkExists(name) {
+  try {
+    return fs.lstatSync(enabledConfPath(name), { throwIfNoEntry: false }) !== undefined
+  } catch {
+    // ELOOP or EACCES: something is there and it is not a plain missing entry. Say it is linked and
+    // let nginx -t complain in its own words — this is also called on the way up, and a throw there
+    // would be the dashboard failing to start.
+    return true
+  }
+}
+
 function siteState(name) {
-  return { enabled: fs.existsSync(enabledConfPath(name)) }
+  return { enabled: linkExists(name) }
 }
 
 function findSite(name) {
@@ -260,8 +318,9 @@ const recover = msg => `${msg}\n\n${SELF_RECOVERY}`
 
 // A disabled site's conf must still be checked: `nginx -t` reads only sites-enabled, so without
 // this it saves with a 200 and only fails later, on Enable. Harmless to link in for the test —
-// see safeApply's testLink.
-const testLinkFor = name => (fs.existsSync(enabledConfPath(name))
+// see safeApply's testLink. `linkExists`, not existsSync: a *dangling* entry is a real symlink, and
+// safeApply removes whatever it linked, so calling that one absent would delete it.
+const testLinkFor = name => (linkExists(name)
   ? undefined
   : { path: enabledConfPath(name), target: siteConfPath(name) })
 
@@ -278,6 +337,8 @@ app.get('/api/sites', (req, res) => {
     ],
     // every site's upstreams and rate-limit zones live in this one file
     httpConfDrift: httpConfDrift(m.sites),
+    // only ever non-null once the dashboard has rewritten its own conf, or failed to
+    selfRepair: lastSelfRepair,
   })
 })
 
@@ -328,7 +389,7 @@ app.put('/api/sites/:name', async (req, res) => {
   const errs = validateSite(site)
   // read from disk, not from the body: testLinkFor links a disabled site in for `nginx -t`, so a
   // payload claiming `enabled` cannot be trusted to mean nginx will actually serve it
-  if (isSelf(name)) errs.push(...selfSiteErrors(site, { host: HOST, port: PORT, enabled: fs.existsSync(enabledConfPath(name)) }))
+  if (isSelf(name)) errs.push(...selfSiteErrors(site, { host: HOST, port: PORT, enabled: linkExists(name) }))
   if (errs.length) return res.status(400).json({ error: errs.join('; ') + (isSelf(name) ? `\n\n${SELF_RECOVERY}` : '') })
 
   await writeHtpasswd(site)
@@ -385,6 +446,31 @@ const toggleSite = toggle => async (req, res) => {
 app.post('/api/sites/:name/enable', toggleSite('enable'))
 app.post('/api/sites/:name/disable', toggleSite('disable'))
 
+// The one state no live trace heals: the vhost is genuinely disabled (no sites-enabled entry) and
+// its conf is gone. There is nothing for selfRepair to key on, and Enable would link to a file that
+// does not exist. Self-only, and only ever for a *missing* conf — a conf that is on disk is what
+// Save is for, which also keeps this from becoming a general "overwrite any site" button.
+app.post('/api/sites/:name/repair', async (req, res) => {
+  const { name } = req.params
+  if (!isSelf(name)) return res.status(403).json({ error: `"${name}" is not this dashboard's own vhost — open it in Sites and save it.` })
+  const m = readManifest()
+  const site = m.sites.find(s => s.name === name)
+  if (!site) return res.status(404).json({ error: 'not found' })
+  if (fs.existsSync(siteConfPath(name))) {
+    return res.status(400).json({ error: `${siteConfPath(name)} is on disk — save the site to rewrite it.` })
+  }
+  // `enabled` deliberately not passed, the same as on create: this runs exactly when the site is
+  // disabled, so requiring it to be live would refuse the repair it exists for.
+  const errs = validateSite(site)
+  errs.push(...selfSiteErrors(site, { host: HOST, port: PORT }))
+  if (errs.length) return res.status(400).json({ error: errs.join('; ') + `\n\n${SELF_RECOVERY}` })
+
+  const result = await apply(siteFiles(name), () => writeSiteFiles(site, m),
+    { label: `rewrite ${name}.conf`, testLink: testLinkFor(name), record: false })
+  if (!result.ok) return res.status(422).json({ error: result.output })
+  res.json({ ok: true })
+})
+
 // ---------- change history: undo a change that turned out badly ----
 // Every successful mutation above is snapshotted by safeApply. Only *failed* changes used to
 // be reversible; a change that worked and then turned out to be wrong had no way back.
@@ -396,7 +482,7 @@ app.post('/api/history/:id/revert', async (req, res) => {
   // undone can carry the dashboard's own vhost back to a state that does not reach this page.
   const entry = readHistoryEntry(req.params.id)
   if (!entry) return res.status(422).json({ error: 'no such history entry' })
-  const errs = selfRevertErrors(entry, { host: HOST, port: PORT, enabled: fs.existsSync(enabledConfPath(SELF_NAME)) })
+  const errs = selfRevertErrors(entry, { host: HOST, port: PORT, enabled: linkExists(SELF_NAME) })
   if (errs.length) return res.status(422).json({ error: recover(`not reverting: ${errs.join('; ')}`) })
 
   const result = await revertHistory(req.params.id, apply)
@@ -574,6 +660,11 @@ app.post('/api/logs/purge', async (req, res) => {
   const r = await shell('find', [PATHS.logDir, '-name', '*.gz', '-mtime', `+${days}`, '-delete'])
   res.json(r.status === 0 ? { ok: true, output: `purged rotated logs older than ${days} days` } : { ok: false, output: r.stderr.trim() })
 })
+
+// Put the dashboard's own vhost back before anything else, so a restart on its own recovers a conf
+// that was deleted by hand — and so the first /api/sites of the new process already reports healthy
+// rather than waiting for some unrelated write to pass through the guard.
+await selfRepair()
 
 // stub_status: loopback-only status server, written once at startup
 const STATUS_CONF = path.join(PATHS.confD, '00-dashboard-status.conf')

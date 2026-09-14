@@ -48,20 +48,30 @@ The dashboard binds to `127.0.0.1:3000` only. Two options:
 - **Its own vhost (from the UI):** open the dashboard over the tunnel, then
   Control → **Reaching this dashboard** → Publish. It writes a site named
   `DASH_SELF_NAME`, bound to one LAN address you pick, allowlisted to private
-  ranges, rate limited, proxying `/` back at this process. Enable it under Sites
-  and issue a certificate there.
+  ranges, rate limited, proxying `/` back at this process, and enables it in the
+  same click. **Manage** opens it as the usual editor form, which is where it
+  takes a certificate.
 
-That second option is the supported one — the vhost is a managed site like any
-other, so it shows up in the list, gets a certificate, and is pinned against
-disable/delete. Doing it by hand is possible but the name has to match
+That second option is the supported one — the vhost is managed like any other
+site, so it gets a certificate and is pinned against disable/delete. It is *not*
+listed under Sites, since it is not one of the sites you serve; it lives on the
+Control tab. Doing it by hand is possible but the name has to match
 `DASH_SELF_NAME` exactly or the guards do not recognise it.
 
 ## If you lock yourself out
 
 The dashboard does not depend on nginx: it is still listening on `DASH_HOST:DASH_PORT`
 whatever the vhost says. `ssh -N -L 3000:127.0.0.1:3000 user@server` and open
-http://localhost:3000. From there, fix or delete
-`/etc/nginx/sites-available/$DASH_SELF_NAME.conf`, or edit it over SSH.
+http://localhost:3000. From there, Control → **Reaching this dashboard** fixes it: it
+rewrites `/etc/nginx/sites-available/$DASH_SELF_NAME.conf` from what the dashboard has
+saved, which is also what happens by itself at the next write or on restart if the file
+was deleted by hand. **Repair it now** is for when the file and its `sites-enabled` entry
+are both gone.
+
+Editing the file over SSH is not a fix — the dashboard renders that file from its own
+saved settings, so the next save discards the edit. Change the settings in the UI
+instead. The one exception is `sites-enabled`: removing the symlink *is* how you
+unpublish it, and a vhost with no entry left is never resurrected.
 
 - **Lost the authenticator:** delete the `DASH_TOTP_SECRET` line from the unit,
   `systemctl daemon-reload && systemctl restart nginx-dashboard`.

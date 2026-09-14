@@ -128,7 +128,7 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
             <p>
               <b>It has drifted.</b> The file on disk is <code>{site.drift}</code>, so it has been
               edited outside the dashboard or removed. {site.drift === 'missing'
-                ? 'nginx drops this vhost the next time any change reloads — Enable will not bring it back, but Save will rewrite it.'
+                ? 'nginx fails on the dangling include until it is back, so every save on every site is refused — the dashboard rewrites this file by itself at the next change, and Save here does it now.'
                 : 'A hand repair over SSH survives until the next Save, which regenerates the file and silently undoes it. Make the change here, or copy the repair into these fields first.'}
             </p>
           )}
