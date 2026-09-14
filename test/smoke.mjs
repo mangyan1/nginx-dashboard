@@ -149,6 +149,27 @@ try {
   check('a site with no listener at all is refused', (await req('PUT', '/api/sites/myapp', { serveHttp: false, https: { mode: 'none' } })).status === 400)
   check('the conf is untouched after a refusal', fs.readFileSync(path.join(FIX, 'nginx', 'sites-available', 'myapp.conf'), 'utf8') === conf3)
 
+  // The defaults the form reads. A "use default" chip can only be honest if it shows the value the
+  // server would actually apply, so the client fetches them instead of keeping a second copy —
+  // it used to have one, and it had already drifted (nine cache extensions against ten here).
+  const defs = await req('GET', '/api/site-defaults?name=myapp')
+  check('site-defaults returns the server defaults',
+    defs.status === 200 && defs.body.defaults.root === '/var/www/myapp' && defs.body.defaults.rateLimit.rps === 50,
+    JSON.stringify(defs.body?.defaults?.rateLimit))
+  check('...and answers before a name exists', (await req('GET', '/api/site-defaults')).body.defaults.root === '/var/www/')
+  check('...and refuses a name that is not one', (await req('GET', '/api/site-defaults?name=' + encodeURIComponent('../evil'))).status === 400)
+
+  // Lists that read "on" in the form while emitting no directive at all. An allowlist is the one
+  // that fails *open*: with no addresses the whole ipRules block is skipped, so no allow and no
+  // deny all are written and the vhost serves everybody.
+  check('an empty allowlist is refused at save, not saved open',
+    (await req('PUT', '/api/sites/myapp', { ipRules: { mode: 'allowlist', ips: [] } })).status === 400)
+  check('...as is one holding only blank rows, which would deny everyone',
+    (await req('PUT', '/api/sites/myapp', { ipRules: { mode: 'allowlist', ips: [''] } })).status === 400)
+  check('...while an empty denylist still saves', (await req('PUT', '/api/sites/myapp', { ipRules: { mode: 'denylist', ips: [] } })).status === 200)
+  check('basic auth on with no users is refused',
+    (await req('PUT', '/api/sites/myapp', { basicAuth: { enabled: true, users: [] } })).status === 400)
+
   // last, because it changes the conf: a proxy rule on `/` and the front controller are both
   // `location /`, and nginx refuses a duplicate — the proxy rule is the one that wins
   const rootProxy = await req('PUT', '/api/sites/myapp', { proxy: [{ path: '/', target: 'http://127.0.0.1:8080' }] })
@@ -164,6 +185,11 @@ try {
     fs.readFileSync(path.join(FIX, 'nginx', 'sites-available', 'catchall.conf'), 'utf8').includes('server_name _;'))
   check('...and its placeholder is not "undefined"',
     fs.readFileSync(path.join(FIX, 'www', 'catchall', 'index.html'), 'utf8').includes('<h1>catchall</h1>'))
+  // A blank docroot is not an error, it is the default — filled from the same factory the chip
+  // reads, so what the form promises is what lands in the conf.
+  const filled = await req('PUT', '/api/sites/catchall', { root: '' })
+  check('a blank docroot is filled from that same default',
+    filled.status === 200 && filled.body.site.root === '/var/www/catchall', JSON.stringify(filled.body.site?.root))
   check('cleanup', (await req('DELETE', '/api/sites/catchall')).body.ok === true)
 
   // the static fallback, the request-body limit and HSTS — through the API, since these are

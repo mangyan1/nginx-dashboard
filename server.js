@@ -232,6 +232,21 @@ app.get('/api/status', async (req, res) => {
   })
 })
 
+/**
+ * The server's own default-site factory, exposed. The site form puts a "use default" chip on every
+ * editable control, and a chip can only be honest if it shows the value the server would actually
+ * apply — the client kept its own copy of these defaults and had already drifted from them (a
+ * nine-entry cache-extension list against the server's ten, so a new site's conf was rendered from
+ * a list the form never displayed). `name` is optional: `root` is the only name-dependent field and
+ * a form for a site that does not exist yet has no name. Declared below requireAuth, so it is
+ * authenticated like every other /api route.
+ */
+app.get('/api/site-defaults', (req, res) => {
+  const name = String(req.query.name || '')
+  if (name && !validName(name)) return res.status(400).json({ error: 'invalid name' })
+  res.json({ defaults: defaultSite(name) })
+})
+
 app.post('/api/nginx/:action', async (req, res) => {
   const { action } = req.params
   if (DRY) return res.json({ ok: true, output: 'dry mode: command skipped' })
@@ -275,22 +290,29 @@ function findSite(name) {
 }
 
 function sanitizeSite(input, base) {
-  const s = { ...base, ...input }
+  // The name is pinned *first*, because it decides the docroot default: read the other way round,
+  // `PUT /api/sites/real` with `{"name":"evil","root":""}` would fill root from /var/www/evil and
+  // write it into real's conf. The URL param names the file; the body never renames it.
+  const name = base ? base.name : String(input?.name || '')
+  const d = defaultSite(name)
+  const s = { ...base, ...input, name }
   for (const k of ['https', 'hsts', 'listen', 'php', 'rateLimit', 'ipRules', 'basicAuth', 'gzip', 'staticCache']) {
-    s[k] = { ...(base?.[k] || defaultSite(s.name)[k]), ...(input?.[k] || {}) }
+    s[k] = { ...(base?.[k] || d[k]), ...(input?.[k] || {}) }
   }
   s.proxy = Array.isArray(input?.proxy) ? input.proxy : (base?.proxy || [])
   s.upstreams = Array.isArray(input?.upstreams) ? input.upstreams : (base?.upstreams || [])
-  s.domains = (s.domains || []).map(String).map(d => d.trim()).filter(Boolean)
-  // API must be safe regardless of what the client sends
-  if (base) s.name = base.name // the URL param names the file; never let the body rename it
-  if (typeof s.root !== 'string' || !s.root.trim()) s.root = `/var/www/${s.name}`
-  if (typeof s.port !== 'number' || s.port < 1 || s.port > 65535) s.port = 80
-  if (typeof s.httpsPort !== 'number' || s.httpsPort < 1 || s.httpsPort > 65535) s.httpsPort = 443
-  if (typeof s.index !== 'string' || !s.index.trim()) s.index = 'index.html index.htm'
+  s.domains = (s.domains || []).map(String).map(x => x.trim()).filter(Boolean)
+  // API must be safe regardless of what the client sends. These five fallbacks used to be literals
+  // typed out again here — a second copy of defaultSite, which is exactly how a default and the
+  // value the API actually applies drift apart. One factory, so the form's "use default" chip
+  // cannot promise a number the server would not have written.
+  if (typeof s.root !== 'string' || !s.root.trim()) s.root = d.root
+  if (typeof s.port !== 'number' || s.port < 1 || s.port > 65535) s.port = d.port
+  if (typeof s.httpsPort !== 'number' || s.httpsPort < 1 || s.httpsPort > 65535) s.httpsPort = d.httpsPort
+  if (typeof s.index !== 'string' || !s.index.trim()) s.index = d.index
   // validateSite rejects an out-of-range value outright; this only keeps a bad one from being
   // rendered if a caller ever reaches the writer without validating first.
-  if (!Number.isInteger(s.clientMaxBodySize) || s.clientMaxBodySize < 0) s.clientMaxBodySize = 0
+  if (!Number.isInteger(s.clientMaxBodySize) || s.clientMaxBodySize < 0) s.clientMaxBodySize = d.clientMaxBodySize
   // derived, never taken from the body: a forged `self: true` on an ordinary site would paint
   // the self badge and grey out its Delete button for no reason
   s.self = isSelf(s.name)

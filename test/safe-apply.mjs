@@ -398,6 +398,46 @@ check('a typo in an ip rule is refused', validateSite({ ...defaultSite('i'), ipR
 check('a blank ip rule row is not an error', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['192.168.1.0/24', ''] } }).length === 0)
 check('cidr and ipv6 rules are accepted', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['10.0.0.0/8', '::1/128', 'fe80::/10'] } }).length === 0)
 
+// ---- 13b. the defaults a site is created with ----
+check('a new site rate limits by default',
+  defaultSite('r').rateLimit.enabled === true && defaultSite('r').rateLimit.rps === 50 && defaultSite('r').rateLimit.burst === 100,
+  JSON.stringify(defaultSite('r').rateLimit))
+// The zone lives in the shared conf and the directive in the site conf, rendered from the same
+// object — a default that reached only one of them would be a site that 503s against no zone.
+check('...the zone reaches the shared conf', renderHttpConf([{ ...defaultSite('r'), domains: ['r.test'] }]).includes('zone=r_rl:10m rate=50r/s'))
+check('...the directive reaches the site conf', renderSiteConf({ ...defaultSite('r'), domains: ['r.test'] }).includes('limit_req zone=r_rl burst=100 nodelay;'))
+// A one-way door: a browser that has read this header refuses plain HTTP for the whole max-age,
+// and that outlives turning the toggle back off. Never armed for someone by default, because the
+// moment a new site is pointed at a self-signed cert it would brick that site with no click-through.
+check('a new site does not arm HSTS', defaultSite('r').hsts.enabled === false)
+
+// ---- 13c. lists the operator asked for and left empty ----
+// These read "on" in the form while nginx sees no directive at all. Each predicate is the
+// renderer's own, so the rule fires exactly when renderDirectives would emit nothing.
+check('an empty allowlist is refused — it emits nothing at all, so the site is open',
+  validateSite({ ...defaultSite('a'), ipRules: { mode: 'allowlist', ips: [] } }).some(e => e.includes('open to everyone')))
+check('...and one holding only blank rows, which denies everyone including you',
+  validateSite({ ...defaultSite('a'), ipRules: { mode: 'allowlist', ips: ['', ' '] } }).some(e => e.includes('403 for everyone')))
+check('an empty denylist is not refused', validateSite({ ...defaultSite('a'), ipRules: { mode: 'denylist', ips: [] } }).length === 0, 'blocking nothing is honest')
+check('basic auth on with no users is refused', validateSite({ ...defaultSite('a'), basicAuth: { enabled: true, users: [] } }).some(e => e.includes('open to everyone')))
+check('...with one blank row, which writes an empty password file and 401s everyone',
+  validateSite({ ...defaultSite('a'), basicAuth: { enabled: true, users: [{ user: '', password: '' }] } }).some(e => e.includes('401')))
+check('...and with a username but no password, which does the same',
+  validateSite({ ...defaultSite('a'), basicAuth: { enabled: true, users: [{ user: 'bob', password: '' }] } }).some(e => e.includes('401')))
+check('...but one complete row is enough', validateSite({ ...defaultSite('a'), basicAuth: { enabled: true, users: [{ user: 'bob', password: 'pw' }] } }).length === 0)
+check('gzip on with no types is refused', validateSite({ ...defaultSite('a'), gzip: { enabled: true, types: [] } }).some(e => e.includes('nothing would be compressed')))
+check('...including when every type in it is invalid', validateSite({ ...defaultSite('a'), gzip: { enabled: true, types: ['nonsense'] } }).some(e => e.includes('nothing would be compressed')))
+check('caching on with no extensions is refused', validateSite({ ...defaultSite('a'), staticCache: { enabled: true, extensions: [], expiresDays: 30 } }).some(e => e.includes('no cache location')))
+check('turning any of them off is always allowed',
+  validateSite({ ...defaultSite('a'), gzip: { enabled: false, types: [] }, staticCache: { enabled: false, extensions: [], expiresDays: 30 }, basicAuth: { enabled: false, users: [] } }).length === 0)
+// Deliberately *not* refused. The toggle is hidden unless there is a certificate, so refusing this
+// would leave the site unsavable with no visible control to fix it — the lockout this whole feature
+// is meant to remove. It is inert on disk (hstsValue returns null without a TLS block) and it is a
+// legitimate staging state; the form carries the warning instead.
+const armed = { ...defaultSite('a'), domains: ['a.test'], https: { ...defaultSite('a').https }, hsts: { ...defaultSite('a').hsts, enabled: true } }
+check('hsts left armed with https off still saves', validateSite(armed).length === 0)
+check('...and emits no header, because it is inert rather than applied', !renderSiteConf(armed).includes('Strict-Transport-Security'))
+
 // ---- 14. TOTP, against RFC 6238's own vectors ----
 const SEED = b32encode(Buffer.from('12345678901234567890'))
 check('rfc 6238 vector at T=59', totp(SEED, 59_000) === '287082', totp(SEED, 59_000))
