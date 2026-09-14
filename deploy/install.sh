@@ -83,10 +83,19 @@ if ! grep -q '^Environment=DASH_PASSWORD' /etc/systemd/system/nginx-dashboard.se
     "$SRC_DIR/deploy/nginx-dashboard.service" > /etc/systemd/system/nginx-dashboard.service
   say "generated dashboard password: $GENERATED_PASSWORD (change it in the unit file)"
 else
+  # carry the second factor across the refresh: the shipped unit carries the whole environment,
+  # so a plain copy would drop a hand-added DASH_TOTP_SECRET and downgrade login to password-only
+  # without saying so
+  KEEP_TOTP=$(grep -h '^Environment=DASH_TOTP_SECRET=' /etc/systemd/system/nginx-dashboard.service || true)
   cp "$SRC_DIR/deploy/nginx-dashboard.service" /etc/systemd/system/nginx-dashboard.service
+  if [ -n "$KEEP_TOTP" ]; then
+    sed -i "s|^#Environment=DASH_TOTP_SECRET=.*|$KEEP_TOTP|" /etc/systemd/system/nginx-dashboard.service
+    say "kept existing DASH_TOTP_SECRET"
+  fi
   say "kept existing DASH_PASSWORD"
 fi
 systemctl daemon-reload
 systemctl enable --now nginx-dashboard
 
 say "done. dashboard listens on 127.0.0.1:3000 — reach it with: ssh -L 3000:localhost:3000 <server>"
+say "to reach it from another machine on the LAN, open the dashboard and use Control → 'Reaching this dashboard' → Publish: it writes a vhost bound to one LAN address and allowlisted to private ranges, then enable it under Sites."

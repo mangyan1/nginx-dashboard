@@ -14,8 +14,15 @@ fs.mkdirSync(D, { recursive: true })
 process.env.DASH_NGINX_DIR = path.join(D, 'nginx')
 process.env.DASH_STATE_DIR = path.join(D, 'state')
 process.env.DASH_LOG_DIR = path.join(D, 'logs')
+// Read at module load, so it has to be set before the import — and it makes this suite the one
+// place the self-vhost guards are exercised outside a running server.
+process.env.DASH_SELF_NAME = 'nxd'
 const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory } = await import('../lib/nginx.js')
-const { defaultSite, renderSiteConf, validateSite, siteConfPath, driftOf, httpConfDrift, renderHttpConf, readManifest } = await import('../lib/manifest.js')
+const {
+  SELF_NAME, isSelf, defaultSite, renderSiteConf, validateSite, siteConfPath, driftOf, httpConfDrift,
+  renderHttpConf, readManifest, parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors,
+} = await import('../lib/manifest.js')
+const { b32encode, b32decode, totp, totpValid, newSecret } = await import('../lib/totp.js')
 
 const realRun = hooks.run
 let failed = 0
@@ -336,7 +343,102 @@ check('...and not when it matches', httpConfDrift([]) === false)
 fs.appendFileSync(HTTP_CONF, '# hand edit\n')
 check('...and flagged again once touched', httpConfDrift([]) === true)
 
+// ---- 13. the dashboard's own vhost ----
+// A site whose absence locks the operator out of the UI that manages every other site. The
+// guards are semantic — "does this still reach the dashboard" — so they are tested on intent
+// rather than on fields: every case below passes `nginx -t` and still leaves the UI unreachable.
+const nx = { ...defaultSite('nxd'), domains: ['dash.test'], proxy: [{ path: '/', target: 'http://127.0.0.1:3000' }] }
+const at = { host: '127.0.0.1', port: 3000, enabled: true }
+const errsOf = s => selfSiteErrors(s, at)
+
+check('SELF_NAME is read from the environment', SELF_NAME === 'nxd' && isSelf('nxd') && !isSelf('dashboard'))
+check('a self site pointed at the dashboard is accepted', errsOf(nx).length === 0, errsOf(nx).join(' | '))
+for (const [name, host, target] of [
+  ['via localhost', '127.0.0.1', 'http://localhost:3000'],
+  ['via [::1]', '127.0.0.1', 'http://[::1]:3000'],
+  ['via the configured host', '192.168.1.10', 'http://192.168.1.10:3000'],
+]) {
+  const e = selfSiteErrors({ ...nx, proxy: [{ path: '/', target }] }, { ...at, host })
+  check(`...including ${name}`, e.length === 0, e.join(' | '))
+}
+check('a missing / rule is refused', errsOf({ ...nx, proxy: [{ path: '/api', target: 'http://127.0.0.1:3000' }] }).length === 1)
+check('the wrong port is refused', errsOf({ ...nx, proxy: [{ path: '/', target: 'http://127.0.0.1:9999' }] }).some(e => e.includes('port 9999')))
+check('another host is refused', errsOf({ ...nx, proxy: [{ path: '/', target: 'http://10.0.0.9:3000' }] }).some(e => e.includes('10.0.0.9')))
+check('an upstream pool is refused', errsOf({ ...nx, proxy: [{ path: '/', target: 'upstream:pool' }] }).some(e => e.includes('upstream pool')))
+check('...and a target that is not a url at all', errsOf({ ...nx, proxy: [{ path: '/', target: 'nonsense' }] }).some(e => e.includes('not a URL this can read')))
+check('https to itself is refused', errsOf({ ...nx, proxy: [{ path: '/', target: 'https://127.0.0.1:3000' }] }).some(e => e.includes('plain HTTP')))
+check('a disabled self site is refused', selfSiteErrors(nx, { ...at, enabled: false }).length === 1)
+check('...but not while enable-ness is unknown', selfSiteErrors(nx, { host: '127.0.0.1', port: 3000 }).length === 0)
+check('changing the domain still passes', errsOf({ ...nx, domains: ['other.test'] }).length === 0)
+check('turning on hsts still passes', errsOf({ ...nx, https: { mode: 'selfsigned' }, hsts: { enabled: true, maxAge: 31536000 } }).length === 0)
+
+const hardened = { ...nx, listenAddress: '192.168.1.10', https: { mode: 'selfsigned' }, ipRules: { mode: 'allowlist', ips: ['192.168.0.0/16'] }, rateLimit: { enabled: true, rps: 30, burst: 60 } }
+check('a hardened self site has nothing to warn about', selfSiteWarnings(hardened).length === 0, selfSiteWarnings(hardened).join(' | '))
+check('a bare one warns about the bind', selfSiteWarnings(nx).some(w => w.includes('listen address')))
+check('...and about the missing allowlist', selfSiteWarnings(nx).some(w => w.includes('allowlist')))
+check('...and about plain http', selfSiteWarnings(nx).some(w => w.includes('clear text')))
+
+// the bind: one listener on one address, and no wildcard left behind
+const bound = renderSiteConf({ ...defaultSite('b'), domains: ['b.test'], https: { mode: 'selfsigned' }, listenAddress: '192.168.1.10' })
+check('a bound site listens on its address', bound.includes('listen 192.168.1.10:80;'), bound.match(/listen[^;]*/g).join(' | '))
+check('...and on the tls port', bound.includes('listen 192.168.1.10:443 ssl;'))
+check('...and on nothing else', !/listen (80|443)[ ;]/.test(bound) && !bound.includes('[::]'), bound.match(/listen[^;]*/g).join(' | '))
+const bound6 = renderSiteConf({ ...defaultSite('b6'), domains: ['b6.test'], https: { mode: 'selfsigned' }, listenAddress: 'fd00::10' })
+check('an ipv6 bind is bracketed', bound6.includes('listen [fd00::10]:80;') && bound6.includes('listen [fd00::10]:443 ssl;'))
+check('an unbound site still listens everywhere', renderSiteConf({ ...defaultSite('u'), domains: ['u.test'] }).includes('listen 80;'))
+check('a bogus listen address is refused', validateSite({ ...defaultSite('x'), listenAddress: '192.168.1.10; }' }).some(e => e.includes('invalid listen address')))
+check('an interface name is not a listen address', validateSite({ ...defaultSite('x'), listenAddress: 'eth0' }).some(e => e.includes('invalid listen address')))
+
+// a proxy rule has to keep the connection open, or the log tail freezes behind it
+const prox = renderSiteConf({ ...defaultSite('p'), domains: ['p.test'], proxy: [{ path: '/api', target: 'http://127.0.0.1:8080' }] })
+check('a proxy rule speaks http/1.1 upstream', prox.includes('proxy_http_version 1.1;') && prox.includes('proxy_set_header Connection "";'))
+check('...and does not buffer the response', prox.includes('proxy_buffering off;'))
+
+check('a typo in an ip rule is refused', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['192.168.1.0/24', 'not-an-ip'] } }).some(e => e.includes('invalid ip rule')))
+check('a blank ip rule row is not an error', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['192.168.1.0/24', ''] } }).length === 0)
+check('cidr and ipv6 rules are accepted', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['10.0.0.0/8', '::1/128', 'fe80::/10'] } }).length === 0)
+
+// ---- 14. TOTP, against RFC 6238's own vectors ----
+const SEED = b32encode(Buffer.from('12345678901234567890'))
+check('rfc 6238 vector at T=59', totp(SEED, 59_000) === '287082', totp(SEED, 59_000))
+check('rfc 6238 vector at T=1111111109', totp(SEED, 1111111109_000) === '081804', totp(SEED, 1111111109_000))
+check('a code is accepted at its own step', totpValid(SEED, '287082', 59_000))
+check('...and one step either side', totpValid(SEED, totp(SEED, 29_000), 59_000) && totpValid(SEED, totp(SEED, 89_000), 59_000))
+check('...but not two steps out', !totpValid(SEED, totp(SEED, 149_000), 59_000))
+// timingSafeEqual throws on unequal lengths; the length is checked before it is reached
+check('a wrong-length code is rejected, not thrown', !totpValid(SEED, '12345', 59_000) && !totpValid(SEED, '', 59_000) && !totpValid(SEED, 'abcdef', 59_000))
+check('a malformed secret throws rather than meaning 2FA off', (() => { try { b32decode('not base32!'); return false } catch { return true } })())
+const minted = newSecret()
+check('a generated secret accepts its own code', minted.length === 32 && totpValid(minted, totp(minted)))
+
+// a revert restores the manifest wholesale, so the snapshot has to be inspected first
+const snap = sites => ({ at: 1, label: 'x', files: [{ path: MANIFEST, content: JSON.stringify({ sites }), link: null }] })
+// The live manifest decides this, so it is written here rather than inherited from whatever the
+// fixture happened to be left holding.
+fs.writeFileSync(MANIFEST, JSON.stringify({ sites: [nx] }))
+check('reverting to before the self site is refused', selfRevertErrors(snap([]), at).some(e => e.includes('predates')))
+check('...and a snapshot that keeps it is allowed', selfRevertErrors(snap([nx]), at).length === 0)
+check('...but not one that keeps it and repoints /', selfRevertErrors(snap([{ ...nx, proxy: [{ path: '/', target: 'http://10.0.0.9:3000' }] }]), at).some(e => e.includes('10.0.0.9')))
+// With nothing published there is nothing to protect: an old undo must still run, or every
+// snapshot taken before the vhost existed would be permanently unusable.
+fs.writeFileSync(MANIFEST, '{"sites":[]}\n')
+check('...while nothing is published, an old snapshot is allowed', selfRevertErrors(snap([]), at).length === 0)
+check('reverting to a disabled symlink is refused',
+  selfRevertErrors({ at: 1, label: 'x', files: [{ path: path.join(PATHS.sitesEn, 'nxd.conf'), content: null, link: null }] }, at).some(e => e.includes('disabled')))
+check('a snapshot that never mentions the symlink is allowed',
+  selfRevertErrors({ at: 1, label: 'x', files: [{ path: HTTP_CONF, content: '# x', link: null }] }, at).length === 0)
+
+// An install that never sets the variable must be untouched by all of the above — including not
+// finding some existing site of its own suddenly undeletable.
+delete process.env.DASH_SELF_NAME
+const off = await import('../lib/manifest.js?self-unset')
+check('with DASH_SELF_NAME unset nothing is pinned', off.SELF_NAME === '' && off.isSelf('nxd') === false)
+check('...and no revert is refused', off.selfRevertErrors(snap([]), at).length === 0)
+check('...and no site is stamped as self', off.readManifest().sites.every(s => !s.self))
+process.env.DASH_SELF_NAME = 'nxd'
+
 hooks.run = realRun
 fs.rmSync(D, { recursive: true, force: true })
 console.log(failed ? `\n${failed} of ${ran} FAILED` : `\nall ${ran} checks passed`)
 process.exit(failed ? 1 : 0)
+

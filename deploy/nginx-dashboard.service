@@ -8,6 +8,15 @@ Environment=DASH_PASSWORD=change-me
 Environment=NODE_ENV=production
 Environment=DASH_HOST=127.0.0.1
 Environment=DASH_PORT=3000
+# The vhost this dashboard manages for itself. Publishing it (Control → "Reaching this dashboard")
+# is what turns the LAN-only guards on; leave it out and no site is pinned.
+Environment=DASH_SELF_NAME=nxd
+# Must be at least the largest file you ever deploy through the dashboard's own vhost.
+Environment=DASH_MAX_UPLOAD_MB=2048
+# Optional second factor. Generate with `npm run totp:new` on the server and paste the line it
+# prints here. Unset = password only. A malformed value refuses to start rather than silently
+# meaning "off", and removing the line is the way back in if the phone is lost.
+#Environment=DASH_TOTP_SECRET=
 Restart=on-failure
 # hardening that doesn't fight the app's need to write /etc/nginx and run nginx
 NoNewPrivileges=true

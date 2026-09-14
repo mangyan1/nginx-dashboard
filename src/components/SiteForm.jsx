@@ -17,6 +17,7 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
     port: site?.port || 80,
     serveHttp: site?.serveHttp !== false,
     httpsPort: site?.httpsPort || 443,
+    listenAddress: site?.listenAddress || '',
     index: site?.index || 'index.html index.htm',
     clientMaxBodySize: site?.clientMaxBodySize || 0,
     https: site?.https || { mode: 'none', forceRedirect: false, manualCert: '', manualKey: '' },
@@ -32,6 +33,7 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
     staticCache: site?.staticCache || { enabled: true, extensions: CACHE_EXT.slice(0, 9), expiresDays: 30 },
   }))
   const [result, setResult] = useState(null)
+  const [warns, setWarns] = useState([])
   const [busy, setBusy] = useState(false)
   // the state this form was opened (or last saved) with, so "dirty" means "differs from that"
   const [baseline, setBaseline] = useState(() => JSON.stringify(s))
@@ -57,11 +59,15 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
         ? await api('POST', '/api/sites', p)
         : await api('PUT', `/api/sites/${s.name}`, p)
       setResult({ ok: true, output: 'saved & applied' })
+      // the server accepts this and still has something to say about it — advisory only, so it
+      // is shown next to the result rather than instead of it
+      setWarns(r.warnings || [])
       // re-baseline: an existing site keeps its key, so the form is not remounted after a save
       // and would otherwise stay "dirty" forever, prompting on the next click
       setBaseline(JSON.stringify(s))
       onSaved(p.name)
     } catch (e) {
+      setWarns([])
       setResult({ ok: false, output: e.message })
     } finally { setBusy(false) }
   }
@@ -101,16 +107,49 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
           <span className={`chip ${site.enabled ? 'ok' : 'off'}`}>{site.enabled ? 'enabled' : 'disabled'}</span>
           {site.drift && <span className="chip warn" title={`the conf file on disk is ${site.drift} — saving rewrites it`}>{site.drift}</span>}
           {!site.managed && <span className="chip un">unmanaged</span>}
+          {site.self && <span className="chip self" title="this is the vhost you are reading this page through">self</span>}
         </>}
         <span className="spacer" />
         {dirty && <span className="chip warn">unsaved</span>}
       </div>
+
+      {/* On screen for the whole life of this site rather than only after something fails: the
+          mistake it warns about is made by typing in the fields directly below it. */}
+      {site?.self && (
+        <div className="selfnote">
+          <h4>This is the vhost you are reading this page through.</h4>
+          <p>
+            Saving here rewrites the file nginx uses to serve this dashboard. It is checked before
+            anything is written — there has to be a proxy rule on <code>/</code> that points back at
+            this process — and disabling or deleting it is refused outright. Everything else, from
+            the domain to the certificate mode to the allowlist, is yours to change.
+          </p>
+          {site.drift && (
+            <p>
+              <b>It has drifted.</b> The file on disk is <code>{site.drift}</code>, so it has been
+              edited outside the dashboard or removed. {site.drift === 'missing'
+                ? 'nginx drops this vhost the next time any change reloads — Enable will not bring it back, but Save will rewrite it.'
+                : 'A hand repair over SSH survives until the next Save, which regenerates the file and silently undoes it. Make the change here, or copy the repair into these fields first.'}
+            </p>
+          )}
+          {site.recovery && <pre className="out">{site.recovery}</pre>}
+        </div>
+      )}
+
       <Section title="Basics">
         {isNew && <Field label="Name (slug)"><input value={s.name} onChange={e => set({ name: e.target.value })} placeholder="myapp" /></Field>}
         <Field label="Domains (comma-separated)"><input value={s.domains} onChange={e => set({ domains: e.target.value })} placeholder="myapp.example.com — blank answers to any name on this port" /></Field>
         <Field label="Document root"><input value={s.root} onChange={e => set({ root: e.target.value })} placeholder={`/var/www/${s.name || 'myapp'}`} /></Field>
         <Field label="Index files (in order)"><input value={s.index} onChange={e => set({ index: e.target.value })} placeholder="index.php index.html" /></Field>
         <Field label="Port (HTTP)"><input type="number" value={s.port} onChange={e => set({ port: Number(e.target.value) })} /></Field>
+        <Field label="Listen address (blank = every interface)">
+          <input value={s.listenAddress} onChange={e => set({ listenAddress: e.target.value.trim() })} placeholder="192.168.1.10" />
+        </Field>
+        <p className="hint">
+          Names one address to bind this vhost to. Blank listens on every interface, IPv6 included —
+          which is what a site facing the internet wants. For a site that must stay on the LAN it is
+          the stronger of the two controls: an allowlist can be got wrong, a bind cannot.
+        </p>
         <Field label="Max request body (MB)"><input type="number" min="0" value={s.clientMaxBodySize} onChange={e => set({ clientMaxBodySize: Number(e.target.value) })} placeholder="0" /></Field>
         <p className="hint">0 keeps nginx's own 1m default. Raise it for large uploads — nginx answers 413 before the file ever reaches PHP or the backend.</p>
       </Section>
@@ -279,13 +318,27 @@ export default function SiteForm({ site, onSaved, onDeleted, onDirty }) {
       </Section>
 
       {!isNew && site.managed && <FileManager siteName={s.name} />}
+      {!!warns.length && (
+        <div className="warns">
+          <b>saved — worth a look</b>
+          <ul>{warns.map((w, i) => <li key={i}>{w}</li>)}</ul>
+        </div>
+      )}
       <Out result={result} />
 
       <div className="savebar">
         <Btn kind="primary" disabled={busy || (isNew && !s.name.trim())} onClick={save}>{busy ? '…' : 'Save & apply'}</Btn>
         {!isNew && <>
-          <Btn disabled={busy} onClick={() => toggle(site.enabled ? 'disable' : 'enable')}>{site.enabled ? 'Disable' : 'Enable'}</Btn>
-          <Btn kind="danger" disabled={busy} onClick={del}>Delete</Btn>
+          {/* greyed rather than left to bounce off a 403: an operator who cannot reach this page
+              again has no way back to the button that explains why */}
+          <Btn disabled={busy || (site.self && site.enabled)} onClick={() => toggle(site.enabled ? 'disable' : 'enable')}
+            title={site.self && site.enabled ? 'This vhost is how you reached this page — disabling it is refused.' : ''}>
+            {site.enabled ? 'Disable' : 'Enable'}
+          </Btn>
+          <Btn kind="danger" disabled={busy || !!site.self} onClick={del}
+            title={site.self ? 'This vhost is how you reached this page — deleting it is refused.' : ''}>
+            Delete
+          </Btn>
         </>}
         <span className="spacer" />
         <span className="note">

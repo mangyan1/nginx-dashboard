@@ -12,6 +12,7 @@ const API = 'http://127.0.0.1:3123'
 const env = {
   ...process.env,
   DASH_PASSWORD: 'testpw', DASH_DRY: '1', DASH_PORT: '3123', DASH_HOST: '127.0.0.1',
+  DASH_SELF_NAME: 'nxd',
   DASH_NGINX_DIR: path.join(FIX, 'nginx'),
   DASH_SITES_AVAIL: path.join(FIX, 'nginx', 'sites-available'),
   DASH_SITES_EN: path.join(FIX, 'nginx', 'sites-enabled'),
@@ -234,6 +235,86 @@ try {
   check('delete site', (await req('DELETE', '/api/sites/myapp')).body.ok === true)
   check('conf gone', !fs.existsSync(path.join(FIX, 'nginx', 'sites-available', 'myapp.conf')))
   check('manifest updated', !(JSON.parse(fs.readFileSync(path.join(FIX, 'state', 'manifest.json'))).sites || []).some(s => s.name === 'myapp'))
+
+  // ---- the dashboard's own vhost, through the API ----
+  // DASH_SELF_NAME is 'nxd' in this env, so that one name is pinned. Everything below is the
+  // difference between a vhost and the vhost you are reading the page through.
+  const selfConf = path.join(FIX, 'nginx', 'sites-available', 'nxd.conf')
+  const pub = await req('POST', '/api/sites', {
+    name: 'nxd', domains: ['dash.test'], port: 8443, listenAddress: '127.0.0.1',
+    proxy: [{ path: '/', target: `http://127.0.0.1:3123` }],
+    ipRules: { mode: 'allowlist', ips: ['127.0.0.1/32', '192.168.0.0/16'] },
+    https: { mode: 'selfsigned' }, rateLimit: { enabled: true, rps: 30, burst: 60 },
+    clientMaxBodySize: 2048,
+  })
+  check('the dashboard vhost is created', pub.status === 200 && pub.body.site.self === true, JSON.stringify(pub.body))
+  check('...with no warnings when it is hardened', !pub.body.warnings, JSON.stringify(pub.body.warnings))
+  let selfText = fs.readFileSync(selfConf, 'utf8')
+  check('...bound to its address on both ports',
+    selfText.includes('listen 127.0.0.1:8443;') && selfText.includes('listen 127.0.0.1:443 ssl;'), selfText.match(/listen[^;]*/g).join(' | '))
+  check('...with the allowlist and no wildcard listener',
+    selfText.includes('allow 192.168.0.0/16;') && selfText.includes('deny all;') && !/listen (8443|443)[ ;]/.test(selfText))
+  check('...proxying / back at the dashboard',
+    selfText.includes('proxy_pass http://127.0.0.1:3123;') && selfText.includes('proxy_buffering off;'))
+
+  check('it cannot be disabled', (await req('POST', '/api/sites/nxd/disable')).status === 403)
+  check('...but it can be enabled', (await req('POST', '/api/sites/nxd/enable')).body.ok === true)
+  check('it cannot be deleted', (await req('DELETE', '/api/sites/nxd')).status === 403)
+  check('...and the refusal says how to get back in',
+    (await req('DELETE', '/api/sites/nxd')).body.error.includes('still listening on 127.0.0.1:3123'))
+
+  const beforeRefusals = fs.readFileSync(selfConf, 'utf8')
+  check('dropping the / rule is refused',
+    (await req('PUT', '/api/sites/nxd', { proxy: [{ path: '/api', target: 'http://127.0.0.1:3123' }] })).status === 400)
+  check('repointing / elsewhere is refused',
+    (await req('PUT', '/api/sites/nxd', { proxy: [{ path: '/', target: 'http://10.0.0.9:3123' }] })).status === 400)
+  check('pointing / at the wrong port is refused',
+    (await req('PUT', '/api/sites/nxd', { proxy: [{ path: '/', target: 'http://127.0.0.1:9999' }] })).status === 400)
+  check('pointing / at an upstream pool is refused',
+    (await req('PUT', '/api/sites/nxd', { proxy: [{ path: '/', target: 'upstream:pool' }] })).status === 400)
+  check('a bogus listen address is refused', (await req('PUT', '/api/sites/nxd', { listenAddress: '127.0.0.1; }' })).status === 400)
+  check('a typo in an ip rule is refused',
+    (await req('PUT', '/api/sites/nxd', { ipRules: { mode: 'allowlist', ips: ['192.168.0.0/16', 'oops'] } })).status === 400)
+  check('the conf is untouched after those refusals', fs.readFileSync(selfConf, 'utf8') === beforeRefusals)
+  check('...and it is still enabled', fs.existsSync(path.join(FIX, 'nginx', 'sites-enabled', 'nxd.conf')))
+
+  const loosened = await req('PUT', '/api/sites/nxd', { ipRules: { mode: 'denylist', ips: [] }, listenAddress: '' })
+  check('a legitimate change still goes through', loosened.status === 200, JSON.stringify(loosened.body))
+  check('...with warnings rather than a refusal',
+    loosened.body.warnings?.some(w => w.includes('listen address')) && loosened.body.warnings.some(w => w.includes('allowlist')),
+    JSON.stringify(loosened.body.warnings))
+  check('...and the warnings come with the way back in', loosened.body.recovery?.includes('ssh -N -L 3123:127.0.0.1:3123'))
+
+  // reverts are file restorers that validate nothing, so the snapshot is inspected first
+  const histDir = path.join(FIX, 'state', 'history')
+  fs.mkdirSync(histDir, { recursive: true })
+  const writeSnap = (id, sites) => fs.writeFileSync(path.join(histDir, id), JSON.stringify({
+    at: 1, label: 'x', files: [{ path: path.join(FIX, 'state', 'manifest.json'), content: JSON.stringify({ sites }), link: null }],
+  }))
+  writeSnap('1700000000000-000001.json', [])
+  // the id is the snapshot's filename, `.json` included — that is what /api/history hands the UI
+  check('reverting to before the vhost existed is refused',
+    (await req('POST', '/api/history/1700000000000-000001.json/revert')).status === 422)
+  const rr = await req('POST', '/api/history/1700000000000-000001.json/revert')
+  check('...and names the reason', rr.body.error.includes('predates'), JSON.stringify(rr))
+  check('...leaving the manifest alone',
+    JSON.parse(fs.readFileSync(path.join(FIX, 'state', 'manifest.json'), 'utf8')).sites.some(s => s.name === 'nxd'))
+  writeSnap('1700000000000-000002.json', JSON.parse(fs.readFileSync(path.join(FIX, 'state', 'manifest.json'), 'utf8')).sites)
+  const okRevert = await req('POST', '/api/history/1700000000000-000002.json/revert')
+  check('a revert that keeps the vhost still runs', okRevert.body.ok === true, JSON.stringify(okRevert))
+  check('a bad history id is still just a 422',
+    (await req('POST', '/api/history/nope.json/revert')).status === 422)
+  // and a slashed one never reaches the handler at all: it cannot match `:id`, so there is no
+  // path to traverse with in the first place
+  check('a slashed history id is not even a route',
+    (await req('POST', '/api/history/../../manifest.json/revert')).status === 404)
+
+  // last: five wrong passwords lock the address out, so nothing may need to log in after this
+  for (let i = 0; i < 5; i++) await req('POST', '/api/login', { password: 'nope' })
+  const locked = await req('POST', '/api/login', { password: 'testpw' })
+  check('the sixth attempt is refused outright', locked.status === 429, `${locked.status} ${JSON.stringify(locked.body)}`)
+  check('...for the right password too', locked.body.error.includes('too many failed logins'))
+  check('...while the session already held still works', (await req('GET', '/api/sites')).status === 200)
 } finally {
   server.kill()
 }

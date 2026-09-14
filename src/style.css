@@ -279,6 +279,22 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-radius
 .out.ok { border-color: var(--ok-line); color: var(--ok); }
 .out.err { border-color: var(--err-lo); color: var(--err); }
 
+/* ── the dashboard's own vhost ─────────────────────────────────────────────── */
+/* Not a chip and not a toast: it is on screen the whole time this site is open, because the
+   mistake it warns about is made by typing in the fields below it. */
+.selfnote { border-bottom: 1px solid var(--line-soft); border-left: 2px solid var(--warn); background: rgba(210, 167, 46, .06); padding: 14px 16px; }
+.selfnote h4 { font: 600 12px/1.35 var(--sans); color: var(--warn-ink); margin: 0 0 6px; }
+.selfnote p { font: 400 11.5px/1.65 var(--sans); color: var(--dim); margin: 0 0 9px; }
+.selfnote p:last-child { margin-bottom: 0; }
+.selfnote .out { margin: 0; border-color: var(--line); background: var(--surface); }
+.chip.self { color: var(--accent-ink); border-color: var(--accent-lo); background: var(--accent-wash); font-weight: 600; }
+
+/* a save that succeeded and still has something to say */
+.warns { border: 1px solid var(--warn-lo); background: rgba(210, 167, 46, .07); border-radius: var(--r); padding: 12px 14px; margin: 10px 0; }
+.warns b { display: block; font: 500 9.5px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--warn-ink); margin-bottom: 9px; }
+.warns ul { margin: 0; padding-left: 16px; }
+.warns li { font: 400 11.5px/1.7 var(--sans); color: var(--dim); }
+
 /* ── control ───────────────────────────────────────────────────────────────── */
 .control { display: flex; flex-direction: column; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }

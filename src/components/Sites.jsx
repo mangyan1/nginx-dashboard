@@ -61,6 +61,7 @@ export default function Sites({ onDirty }) {
                   <span className="site-dom">{subtitle(s)}</span>
                 </span>
                 <span className="badges">
+                  {s.self && <em className="chip self" title="the vhost this dashboard is reached through — cannot be disabled or deleted">self</em>}
                   {s.drift && <em className="chip warn" title={`the conf file is ${s.drift} — saving from here rewrites it`}>{s.drift}</em>}
                   {!s.managed && <em className="chip un">unmanaged</em>}
                   {s.managed && <em className={`chip ${s.enabled ? 'ok' : 'off'}`}>{s.enabled ? 'on' : 'off'}</em>}

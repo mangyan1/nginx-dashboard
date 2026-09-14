@@ -23,25 +23,52 @@ The installer generates a random `DASH_PASSWORD` and prints it once.
 It's stored in `/etc/systemd/system/nginx-dashboard.service` — change it there,
 then `systemctl restart nginx-dashboard`.
 
+## Environment
+
+Everything is set in the systemd unit. The installer carries an existing
+`DASH_TOTP_SECRET` across a re-run; the rest come from the shipped unit file.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DASH_PASSWORD` | — | the login password; required |
+| `DASH_HOST` / `DASH_PORT` | `127.0.0.1` / `3000` | what the dashboard itself binds |
+| `DASH_SELF_NAME` | `nxd` | name of the dashboard's own managed vhost; unset pins nothing |
+| `DASH_MAX_UPLOAD_MB` | `2048` | upload cap for the file manager, and the default for the self vhost's `client_max_body_size` |
+| `DASH_TOTP_SECRET` | unset | base32 TOTP secret; unset = password only |
+| `DASH_DRY` | unset | `1` writes config but skips `nginx -t`, reloads and certbot |
+
+`npm run totp:new` on the server prints a fresh secret, the `otpauth://` URI to
+scan, and the exact `Environment=` line to paste into the unit.
+
 ## Access
 
 The dashboard binds to `127.0.0.1:3000` only. Two options:
 
-- **SSH tunnel (default):** `ssh -L 3000:localhost:3000 server` → open http://localhost:3000
-- **TLS vhost:** proxy it through nginx itself:
+- **SSH tunnel:** `ssh -L 3000:localhost:3000 server` → open http://localhost:3000
+- **Its own vhost (from the UI):** open the dashboard over the tunnel, then
+  Control → **Reaching this dashboard** → Publish. It writes a site named
+  `DASH_SELF_NAME`, bound to one LAN address you pick, allowlisted to private
+  ranges, rate limited, proxying `/` back at this process. Enable it under Sites
+  and issue a certificate there.
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name dash.example.com;
-    ssl_certificate     /etc/letsencrypt/live/dash.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/dash.example.com/privkey.pem;
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-    }
-}
-```
+That second option is the supported one — the vhost is a managed site like any
+other, so it shows up in the list, gets a certificate, and is pinned against
+disable/delete. Doing it by hand is possible but the name has to match
+`DASH_SELF_NAME` exactly or the guards do not recognise it.
+
+## If you lock yourself out
+
+The dashboard does not depend on nginx: it is still listening on `DASH_HOST:DASH_PORT`
+whatever the vhost says. `ssh -N -L 3000:127.0.0.1:3000 user@server` and open
+http://localhost:3000. From there, fix or delete
+`/etc/nginx/sites-available/$DASH_SELF_NAME.conf`, or edit it over SSH.
+
+- **Lost the authenticator:** delete the `DASH_TOTP_SECRET` line from the unit,
+  `systemctl daemon-reload && systemctl restart nginx-dashboard`.
+- **Locked out by the allowlist or a bad `listen`:** the tunnel is unaffected —
+  `req.ip` is loopback there, and nothing in the dashboard's own bind changes.
+- **Lost the password:** set a new `DASH_PASSWORD` in the unit and restart. Login
+  throttling is in memory, so a restart also clears a lockout.
 
 ## Privileges
 

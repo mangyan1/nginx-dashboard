@@ -1,31 +1,63 @@
 import express from 'express'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import multer from 'multer'
 import { spawn } from 'node:child_process' // tail -F for SSE; args are a fixed array, never user strings
 import {
   PATHS, MANIFEST, HTTP_CONF, mkdirs, validName, safeJoin, safeApply,
-  nginxTest, systemctl, shell, listHistory, revertHistory,
+  nginxTest, systemctl, shell, listHistory, revertHistory, readHistoryEntry,
 } from './lib/nginx.js'
 import {
-  defaultSite, readManifest, writeManifest, siteConfPath, enabledConfPath, certDir,
+  SELF_NAME, isSelf, defaultSite, readManifest, writeManifest, siteConfPath, enabledConfPath, certDir,
   renderHttpConf, renderSiteConf, writeHtpasswd, validateSite, driftOf, httpConfDrift,
+  parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors,
 } from './lib/manifest.js'
+import { b32decode, totpValid } from './lib/totp.js'
 
-const PORT = process.env.DASH_PORT || 3000
+// Number(), not the raw string: every comparison against this port is numeric, and a string
+// would make each one false — the self-vhost check included.
+const PORT = Number(process.env.DASH_PORT) || 3000
 const HOST = process.env.DASH_HOST || '127.0.0.1'
 const PASSWORD = process.env.DASH_PASSWORD
 const DRY = process.env.DASH_DRY === '1' // dev mode: write files, skip nginx -t / reload / systemctl / certbot
+const TOTP_SECRET = process.env.DASH_TOTP_SECRET || ''
+const MAX_UPLOAD_MB = Number(process.env.DASH_MAX_UPLOAD_MB) || 2048
 
 if (!PASSWORD) {
   console.error('Set DASH_PASSWORD env var before starting.')
   process.exit(1)
 }
 
+if (TOTP_SECRET) {
+  try {
+    b32decode(TOTP_SECRET)
+  } catch (e) {
+    // Never a silent "second factor off": a mistyped secret that quietly drops 2FA is worse than
+    // a dashboard that will not start. `npm run totp:new` prints a secret that parses.
+    console.error(`DASH_TOTP_SECRET is not a base32 secret (${e.message}). Run: npm run totp:new`)
+    process.exit(1)
+  }
+}
+
+// What to do when a self-vhost guard refuses. The point of every refusal is that the operator is
+// mid-lockout, so the way out belongs in the refusal itself, not in a doc they cannot reach.
+const SELF_RECOVERY = [
+  `You are not locked out: nginx serves the websites, but this dashboard is its own process and`,
+  `is still listening on ${HOST}:${PORT}.`,
+  `  from your machine:  ssh -N -L ${PORT}:${HOST}:${PORT} you@server   then open http://localhost:${PORT}`,
+  `  on the server:      fix or move /etc/nginx/sites-available/${SELF_NAME}.conf, then nginx -t && nginx -s reload`,
+].join('\n')
+
 mkdirs()
 
 const app = express()
+// Behind its own vhost every request arrives from nginx, so without this req.ip is 127.0.0.1 for
+// everybody — one shared throttle bucket, where one attacker's five wrong passwords lock out the
+// operator. 'loopback' rather than true: a forged X-Forwarded-For is only believed when the peer
+// really is nginx, which is not the case if the port is ever reachable directly.
+app.set('trust proxy', 'loopback')
 app.use(express.json({ limit: '1mb' }))
 
 // ---------- auth: random token, in-memory map, cookie ----------
@@ -56,20 +88,67 @@ function requireAuth(req, res, next) {
   next()
 }
 
+// Secure only when the request actually arrived over TLS. Setting it unconditionally would break
+// the plain-HTTP SSH tunnel — which is the documented way back in when the vhost is broken, so
+// the one cookie flag that hardens the normal path must not disable the recovery path.
+const sessionCookie = (req, value, maxAge) =>
+  `${COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${req.secure ? '; Secure' : ''}`
+
+// ---------- login throttle ----------
+// One shared password that is effectively root, on a port the LAN can reach: unthrottled it is
+// guessable at whatever rate the network allows. In memory on purpose — restarting the service
+// clears a lockout, and that is the recovery. A lockout persisted to disk is a lockout with
+// nobody holding the key.
+const FAILS = new Map() // ip -> { n, first, until }
+const FAIL_MAX = 5
+const FAIL_WINDOW = 15 * 60_000
+const LOCK_FOR = 15 * 60_000
+
+/** Seconds the caller must wait, or 0. Also drops an entry whose window has rolled over. */
+function lockoutFor(ip) {
+  const f = FAILS.get(ip)
+  if (!f) return 0
+  const now = Date.now()
+  if (f.until > now) return Math.ceil((f.until - now) / 1000)
+  if (now - f.first > FAIL_WINDOW) FAILS.delete(ip)
+  return 0
+}
+
+function noteFailure(ip) {
+  const now = Date.now()
+  const f = FAILS.get(ip)
+  if (!f || now - f.first > FAIL_WINDOW) { FAILS.set(ip, { n: 1, first: now, until: 0 }); return }
+  if (++f.n >= FAIL_MAX) f.until = now + LOCK_FOR
+}
+
 app.post('/api/login', (req, res) => {
+  const ip = req.ip || 'unknown'
+  const wait = lockoutFor(ip)
+  if (wait) {
+    res.setHeader('Retry-After', String(wait))
+    return res.status(429).json({ error: `too many failed logins — try again in ${Math.ceil(wait / 60)} min` })
+  }
   const given = crypto.createHash('sha256').update(String(req.body?.password || '')).digest()
   const stored = crypto.createHash('sha256').update(PASSWORD).digest()
-  if (!crypto.timingSafeEqual(given, stored)) return res.status(401).json({ error: 'wrong password' })
+  const pwOk = crypto.timingSafeEqual(given, stored) // both fixed-width digests, so equal length
+  // Checked after the password, never before: an unauthenticated caller must not get an oracle
+  // that tells them whether a guessed code was right.
+  const codeOk = !TOTP_SECRET || totpValid(TOTP_SECRET, req.body?.code)
+  if (!pwOk || !codeOk) {
+    noteFailure(ip)
+    return res.status(401).json({ error: pwOk ? 'wrong code' : 'wrong password' })
+  }
+  FAILS.delete(ip)
   const token = crypto.randomBytes(32).toString('hex')
   sessions.set(token, { expires: Date.now() + 24 * 3600_000 })
-  res.setHeader('Set-Cookie', `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`)
+  res.setHeader('Set-Cookie', sessionCookie(req, token, 86400))
   res.json({ ok: true })
 })
 
 app.post('/api/logout', (req, res) => {
   const token = parseCookies(req)[COOKIE]
   if (token) sessions.delete(token)
-  res.setHeader('Set-Cookie', `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`)
+  res.setHeader('Set-Cookie', sessionCookie(req, '', 0))
   res.json({ ok: true })
 })
 
@@ -97,7 +176,21 @@ app.get('/api/status', async (req, res) => {
   // `nginx -v` prints to stderr. When the binary is missing that slot holds ENOENT text
   // instead, which the UI would render as the version — so only send it when it is one.
   const raw = (v.stderr || v.stdout).trim()
-  res.json({ active, version: raw.includes('nginx/') ? raw : '', dry: DRY })
+  res.json({
+    active, version: raw.includes('nginx/') ? raw : '', dry: DRY,
+    // what the dashboard itself is bound to, so the UI can prefill a vhost that points back here
+    host: HOST, port: PORT, selfName: SELF_NAME, totp: !!TOTP_SECRET, maxUploadMB: MAX_UPLOAD_MB,
+    // non-loopback addresses of this box, to pick a LAN bind from. link-local IPv6 carries a
+    // scope id (`fe80::1%eth0`) that is not valid in a `listen`, so it is filtered out here; the
+    // bare `fe80::` form is no better, since without the interface it reaches nothing that a
+    // `listen` can express. Ordered IPv4-first because a private IPv4 address is what "on the
+    // LAN" means to the operator picking one, and the first entry is the default.
+    addresses: Object.values(os.networkInterfaces()).flat()
+      .filter(i => i && !i.internal && !i.address.includes('%'))
+      .filter(i => i.family !== 'IPv6' || !/^fe80:/i.test(i.address))
+      .sort((a, b) => (a.family === 'IPv6' ? 1 : 0) - (b.family === 'IPv6' ? 1 : 0))
+      .map(i => ({ address: i.address, family: i.family === 'IPv6' ? 6 : 4 })),
+  })
 })
 
 app.post('/api/nginx/:action', async (req, res) => {
@@ -140,6 +233,9 @@ function sanitizeSite(input, base) {
   // validateSite rejects an out-of-range value outright; this only keeps a bad one from being
   // rendered if a caller ever reaches the writer without validating first.
   if (!Number.isInteger(s.clientMaxBodySize) || s.clientMaxBodySize < 0) s.clientMaxBodySize = 0
+  // derived, never taken from the body: a forged `self: true` on an ordinary site would paint
+  // the self badge and grey out its Delete button for no reason
+  s.self = isSelf(s.name)
   return s
 }
 
@@ -152,6 +248,15 @@ function writeSiteFiles(site, m) {
 // MANIFEST belongs in the transaction: it is written inside mutate(), so leaving it out of
 // `files` means a failed nginx -t rolls the conf back while the manifest keeps the change.
 const siteFiles = name => [siteConfPath(name), HTTP_CONF, MANIFEST]
+
+// Advisory, and only for the dashboard's own vhost — a save that would work but leave it more
+// exposed than it needs to be still goes through, and the response carries the reason to reconsider.
+const warningPayload = site => {
+  const warnings = isSelf(site.name) ? selfSiteWarnings(site) : []
+  return warnings.length ? { warnings, recovery: SELF_RECOVERY } : {}
+}
+
+const recover = msg => `${msg}\n\n${SELF_RECOVERY}`
 
 // A disabled site's conf must still be checked: `nginx -t` reads only sites-enabled, so without
 // this it saves with a 200 and only fails later, on Enable. Harmless to link in for the test —
@@ -168,7 +273,7 @@ app.get('/api/sites', (req, res) => {
     : []
   res.json({
     sites: [
-      ...m.sites.map(s => ({ ...s, managed: true, ...siteState(s.name), drift: driftOf(s) })),
+      ...m.sites.map(s => ({ ...s, managed: true, ...siteState(s.name), drift: driftOf(s), ...(s.self ? { recovery: SELF_RECOVERY } : {}) })),
       ...onDisk.filter(n => !managed.has(n)).map(n => ({ name: n, managed: false, ...siteState(n) })),
     ],
     // every site's upstreams and rate-limit zones live in this one file
@@ -181,7 +286,7 @@ app.get('/api/sites/:name', (req, res) => {
   if (!validName(name)) return res.status(400).json({ error: 'invalid name' })
   const site = findSite(name)
   if (!site) return res.status(404).json({ error: 'not found (unmanaged sites are read-only)' })
-  res.json({ site, ...siteState(name), drift: driftOf(site) })
+  res.json({ site, ...siteState(name), drift: driftOf(site), ...(site.self ? { recovery: SELF_RECOVERY } : {}) })
 })
 
 app.post('/api/sites', async (req, res) => {
@@ -192,7 +297,11 @@ app.post('/api/sites', async (req, res) => {
   const site = sanitizeSite({ ...req.body, name })
 
   const errs = validateSite(site)
-  if (errs.length) return res.status(400).json({ error: errs.join('; ') })
+  // `enabled` deliberately not passed: every site is created disabled, so requiring the self
+  // vhost to already be live here would make publishing it impossible. The form says to click
+  // Enable, and the next save is checked against the state on disk.
+  if (isSelf(name)) errs.push(...selfSiteErrors(site, { host: HOST, port: PORT }))
+  if (errs.length) return res.status(400).json({ error: errs.join('; ') + (isSelf(name) ? `\n\n${SELF_RECOVERY}` : '') })
 
   m.sites.push(site)
   await writeHtpasswd(site)
@@ -206,7 +315,7 @@ app.post('/api/sites', async (req, res) => {
   const idx = path.join(site.root, 'index.html')
   if (!fs.existsSync(idx)) fs.writeFileSync(idx, `<h1>${site.domains[0] || site.name}</h1>\n<p>Deployed via nginx-dashboard.</p>\n`)
 
-  res.json({ ok: true, site })
+  res.json({ ok: true, site, ...warningPayload(site) })
 })
 
 app.put('/api/sites/:name', async (req, res) => {
@@ -217,17 +326,25 @@ app.put('/api/sites/:name', async (req, res) => {
   const site = sanitizeSite(req.body, base)
 
   const errs = validateSite(site)
-  if (errs.length) return res.status(400).json({ error: errs.join('; ') })
+  // read from disk, not from the body: testLinkFor links a disabled site in for `nginx -t`, so a
+  // payload claiming `enabled` cannot be trusted to mean nginx will actually serve it
+  if (isSelf(name)) errs.push(...selfSiteErrors(site, { host: HOST, port: PORT, enabled: fs.existsSync(enabledConfPath(name)) }))
+  if (errs.length) return res.status(400).json({ error: errs.join('; ') + (isSelf(name) ? `\n\n${SELF_RECOVERY}` : '') })
 
   await writeHtpasswd(site)
   m.sites = m.sites.map(s => (s.name === name ? site : s))
   const result = await apply(siteFiles(name), () => writeSiteFiles(site, m), { label: `update site ${name}`, testLink: testLinkFor(name) })
   if (!result.ok) return res.status(422).json({ error: result.output })
-  res.json({ ok: true, site })
+  res.json({ ok: true, site, ...warningPayload(site) })
 })
 
 app.delete('/api/sites/:name', async (req, res) => {
   const { name } = req.params
+  // The one deletion that removes the page the operator is looking at. Refused rather than
+  // warned: there is no "undo" click available to someone who cannot load the UI.
+  if (isSelf(name)) {
+    return res.status(403).json({ error: `"${name}" is this dashboard's own vhost — deleting it would take away the page you are clicking on.\n\n${SELF_RECOVERY}` })
+  }
   const m = readManifest()
   if (!m.sites.some(s => s.name === name)) return res.status(404).json({ error: 'not found' })
   m.sites = m.sites.filter(s => s.name !== name)
@@ -248,6 +365,11 @@ app.delete('/api/sites/:name', async (req, res) => {
 const toggleSite = toggle => async (req, res) => {
   const { name } = req.params
   if (!findSite(name)) return res.status(404).json({ error: 'not found' })
+  // Disable is refused on the dashboard's own vhost; Enable is not. Enable is the way back in
+  // after a hand-edit or a bad cert, so it has to stay available precisely where disabling is not.
+  if (toggle === 'disable' && isSelf(name)) {
+    return res.status(403).json({ error: recover(`"${name}" is this dashboard's own vhost — disabling it would take this page offline. Edit it instead, or take it out of sites-enabled on the server if that is really what you want.`) })
+  }
   const result = await apply([enabledConfPath(name)], () => {
     if (toggle === 'enable') {
       fs.rmSync(enabledConfPath(name), { force: true })
@@ -269,13 +391,26 @@ app.post('/api/sites/:name/disable', toggleSite('disable'))
 app.get('/api/history', (req, res) => res.json({ entries: listHistory() }))
 
 app.post('/api/history/:id/revert', async (req, res) => {
-  const result = await revertHistory(req.params.id)
+  // Look at the snapshot before letting the restore run. revertHistory validates nothing — it
+  // puts bytes back — and it restores the manifest wholesale, so an unrelated old change being
+  // undone can carry the dashboard's own vhost back to a state that does not reach this page.
+  const entry = readHistoryEntry(req.params.id)
+  if (!entry) return res.status(422).json({ error: 'no such history entry' })
+  const errs = selfRevertErrors(entry, { host: HOST, port: PORT, enabled: fs.existsSync(enabledConfPath(SELF_NAME)) })
+  if (errs.length) return res.status(422).json({ error: recover(`not reverting: ${errs.join('; ')}`) })
+
+  const result = await revertHistory(req.params.id, apply)
   if (!result.ok) return res.status(422).json({ error: result.output })
   res.json({ ok: true, output: result.output })
 })
 
 // ---------- module 2: docroot file manager ----------
-const upload = multer({ dest: path.join(PATHS.stateDir, 'uploads') })
+// Bounded, because this writes into a process running as root and `express.json`'s 1mb cap does
+// not apply to multipart at all — without a limit, "deploy a zip" is an unbounded write to /tmp.
+const upload = multer({
+  dest: path.join(PATHS.stateDir, 'uploads'),
+  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024, files: 200 },
+})
 
 app.get('/api/sites/:name/files', (req, res) => {
   const site = findSite(req.params.name)
@@ -393,6 +528,10 @@ app.get('/api/logs/tail', (req, res) => {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
+    // Tells any nginx in front not to buffer this response. It only matters when the dashboard is
+    // reached through a hand-written vhost — one this dashboard generated sets proxy_buffering off
+    // itself — but a frozen log tail is otherwise very hard to explain.
+    'X-Accel-Buffering': 'no',
   })
   res.write(': connected\n\n') // flush, so a proxy in front opens the stream immediately
 
@@ -476,6 +615,11 @@ app.use(express.static(path.resolve('dist')))
 app.use((err, req, res, _next) => {
   console.error(err)
   if (res.headersSent) return
+  // multer's own rejection, not a bug: "your zip is bigger than the limit" deserves a 413 and a
+  // sentence about which knob raises it, not a 500 and a stack trace.
+  if (err?.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ error: `file too large — the dashboard's upload limit is ${MAX_UPLOAD_MB} MB (raise DASH_MAX_UPLOAD_MB in the service unit)` })
+  }
   res.status(500).json({ error: 'internal error' })
 })
 

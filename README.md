@@ -92,9 +92,52 @@ proxy rule wins and the fallback stands down.
 
 ## Security model
 
-- One password (`DASH_PASSWORD` env), session cookie, `HttpOnly SameSite=Strict`.
-- Binds to `127.0.0.1:3000` — reach it via SSH tunnel or an nginx TLS vhost.
+- One password (`DASH_PASSWORD` env), session cookie, `HttpOnly SameSite=Strict`,
+  `Secure` once the request arrives over TLS.
+- Login is throttled: five failures from one address lock it out for fifteen
+  minutes (`429` + `Retry-After`). In memory, so restarting the service clears it.
+- Optional TOTP second factor (`DASH_TOTP_SECRET`, off by default). Generate one
+  with `npm run totp:new` on the server and paste the line it prints into the unit.
+- Binds to `127.0.0.1:3000` — reach it via SSH tunnel, or publish its own vhost.
 - Anyone with the password effectively has root: keep it strong.
+
+### Reaching it from the LAN
+
+This dashboard is the LAN-only tool; the sites it manages are the WAN-facing part.
+Control → **Reaching this dashboard** writes a vhost for the dashboard itself,
+prefilled to bind one specific LAN address, allow to private ranges only, rate
+limit, and proxy `/` back at this process. It is created disabled — enable it under
+Sites, which is also where it gets a certificate.
+
+That site is pinned by `DASH_SELF_NAME`: the dashboard recognises its own vhost and
+**refuses to disable or delete it**. Publishing it is what turns the guards on; with
+the variable unset nothing is pinned, so an existing install cannot become
+undeletable just by upgrading.
+
+Every save of it is still validated — a change that would stop `/` reaching this
+process is refused before anything is written, including one that leaves it
+disabled (a disabled site is invisible to `nginx -t`, so that would otherwise pass
+and cost you the browser). Everything else about it — domains, HSTS, the allowlist,
+the certificate — only produces a warning.
+
+### If you lock yourself out
+
+**The dashboard process does not depend on nginx.** It is still listening on
+`DASH_HOST:DASH_PORT` whatever the vhost says, so a broken vhost costs you the
+browser, not the tool:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 user@server   # then open http://localhost:3000
+```
+
+Lost the phone with the authenticator? Remove `DASH_TOTP_SECRET` from
+`/etc/systemd/system/nginx-dashboard.service`, `systemctl daemon-reload &&
+systemctl restart nginx-dashboard`. Login falls back to password only.
+
+Locked out by the vhost's allowlist or a bad `listen`? The same route works, and the
+offending file is `/etc/nginx/sites-available/<DASH_SELF_NAME>.conf` — edit it there
+or fix it in the UI over the tunnel. If you have lost the password too, set a new
+`DASH_PASSWORD` in the unit and restart.
 
 ## Dev & deploy
 

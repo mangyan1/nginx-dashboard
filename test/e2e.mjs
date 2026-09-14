@@ -74,7 +74,7 @@ const alive = pid => { if (!pid) return false; try { process.kill(pid, 0); retur
 sh('nginx', alive(masterPid()) ? ['-s', 'reload'] : []) // reload the wipe in; -s reload needs a master
 
 const server = spawn(process.execPath, [path.join(root, 'server.js')], {
-  env: { ...process.env, DASH_PASSWORD: 'e2epw' }, // no DASH_DRY: real nginx -t and reload
+  env: { ...process.env, DASH_PASSWORD: 'e2epw', DASH_SELF_NAME: 'nxd' }, // no DASH_DRY: real nginx -t and reload
   stdio: ['ignore', 'pipe', 'pipe'],
 })
 let serverLog = ''
@@ -216,6 +216,46 @@ try {
   }
   check('live-tailed a request made after the stream opened', seen.includes('sse-canary'), JSON.stringify(seen.slice(-160)))
   await reader.cancel()
+
+  // ---- the dashboard's own vhost, under a real nginx ----
+  // Everything above serves a site *outward*. This one serves the dashboard itself, and it is the
+  // only place these guards meet a genuine `nginx -t` and real traffic: DRY mode never loads the
+  // generated conf at all. The allowlist is loopback-only so curl from inside the container passes.
+  const selfPub = await req('POST', '/api/sites', {
+    name: 'nxd', domains: ['nxd.test'],
+    ipRules: { mode: 'allowlist', ips: ['127.0.0.1/32', '::1/128'] },
+    proxy: [{ path: '/', target: 'http://127.0.0.1:3000' }],
+    rateLimit: { enabled: true, rps: 30, burst: 60 },
+  })
+  check('the dashboard publishes its own vhost', selfPub.status === 200, JSON.stringify(selfPub.body))
+  check('...and it is stamped as the pinned one', selfPub.body.site?.self === true, JSON.stringify(selfPub.body.site?.self))
+  check('...with the streaming directives in its conf', read(path.join(AVAIL, 'nxd.conf'))?.includes('proxy_buffering off;'))
+  check('disabling the pinned vhost is refused', (await req('POST', '/api/sites/nxd/disable')).status === 403)
+  check('deleting it is refused', (await req('DELETE', '/api/sites/nxd')).status === 403)
+  check('enabling it is not', (await req('POST', '/api/sites/nxd/enable')).status === 200)
+  // /api/status rather than /: the shell is served either way, but a proxied API call is the part
+  // that breaks when the proxy rule is wrong, and 401 from *our* process is the proof it arrived.
+  let dashThroughVhost = false
+  for (let i = 0; i < 50 && !dashThroughVhost; i++) {
+    dashThroughVhost = viaNginx('nxd.test', '/api/status').includes('unauthorized')
+    if (!dashThroughVhost) await new Promise(r => setTimeout(r, 100))
+  }
+  check('nginx serves the dashboard through its own vhost', dashThroughVhost,
+    JSON.stringify(viaNginx('nxd.test', '/api/status').slice(0, 120)))
+
+  // The buffering fix, proven rather than asserted: with proxy_buffering at nginx's default the
+  // line below parks in nginx's buffer and never arrives inside the window. Read through the
+  // vhost, and note this also exercises trust-proxy — the cookie has to survive the hop.
+  const tailer = spawn('curl', ['-sN', '--max-time', '10',
+    '-H', 'Host: nxd.test', '-H', `cookie: ${cookie}`, 'http://127.0.0.1/api/logs/tail?file=access'])
+  let through = ''
+  tailer.stdout.on('data', d => { through += d })
+  await new Promise(r => setTimeout(r, 500))
+  viaNginx('nxd.test', '/through-the-proxy-canary') // traffic generated *after* the stream opened
+  for (let i = 0; i < 40 && !through.includes('through-the-proxy-canary'); i++) await new Promise(r => setTimeout(r, 100))
+  check('a log line reaches an SSE client through the generated vhost',
+    through.includes('through-the-proxy-canary'), JSON.stringify(through.slice(-200)))
+  tailer.kill('SIGKILL')
 
   // ---- module 6: metrics from a real stub_status ----
   const m = await req('GET', '/api/metrics')
