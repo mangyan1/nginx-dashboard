@@ -2,6 +2,7 @@
   "name": "nginx-dashboard",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Web dashboard that controls NGINX via buttons instead of the command line",
   "type": "module",
   "scripts": {
