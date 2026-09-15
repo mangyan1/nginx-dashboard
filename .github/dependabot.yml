@@ -1,0 +1,42 @@
+# Dependabot version updates. The security half was already on — a CVE against express opens a PR
+# with or without this file. This is the routine half: a patch that ships without an advisory never
+# opened anything, so nothing in `package.json` moved except when someone happened to look.
+#
+# Renovate would do the same job, and more, but it needs an app installed on the account and a
+# dashboard of its own to keep in sync. This repository is public, so Dependabot's runners and its
+# existing alerts cost nothing, and one system that already knows about the CVEs beats two.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # Grouped, because the failure mode of per-dependency PRs is eleven open ones that nobody reads.
+    # Six of the eight dependencies are build-time — vite, react, chart.js — so a minor bump of any
+    # of them rebuilds `dist/`, which is exactly what the "dist is current" job in ci.yml checks.
+    # One PR that fails for one reason beats six that fail for the same one.
+    groups:
+      npm-minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
+    # Majors stay ungrouped and unmerged: express 6 and react 20 are reviews, not merges, and the
+    # default limit keeps at most five of them parked at a time.
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # All of them into one PR, majors included. checkout v7 to v8 is a one-line change in ci.yml,
+    # and three separate PRs for three one-line changes is three times the reading for no less risk.
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: docker
+    directory: /test
+    schedule:
+      interval: weekly
+    # test/Dockerfile.e2e is the only image in the repository and it is the one the nginx job runs
+    # on, so a nginx or node base bump is tested by CI before it can matter to anyone.
