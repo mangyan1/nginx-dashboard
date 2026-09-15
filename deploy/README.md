@@ -27,7 +27,7 @@ image has neither. The same check runs here, minus systemd, which no container h
 docker run --rm -v "$PWD:/src" debian:13 bash /src/test/install-container.sh
 ```
 
-The node version that installer puts on a server (`NODE_MIN`, 22 here) is a literal in
+The node version that installer puts on a server (`NODE_MIN`, 24 here) is a literal in
 a shell script, which is not a manifest: Dependabot cannot see it, so it can go
 end-of-life without a PR or a red test. `npm run test:floor` closes that — it reads
 `NODE_MIN`, `engines.node` and the CI matrix, checks the three agree, and asks node's

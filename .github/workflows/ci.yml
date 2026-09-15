@@ -35,17 +35,21 @@ concurrency:
 
 jobs:
   api:
-    # The matrix is the `engines` field kept honest. package.json promises >=22.12.0, which is a
+    # The matrix is the `engines` field kept honest. package.json promises >=24.0.0, which is a
     # claim about the operator's server rather than about this checkout, and 24 is what
-    # test/Dockerfile.e2e actually ships on. Anything that works only on 24 would otherwise pass
+    # test/Dockerfile.e2e actually ships on. Anything that works only on 26 would otherwise pass
     # here and fail on a box running the floor.
+    #
+    # The contexts this job reports are required checks on main, so the leg names are part of
+    # branch protection: renaming one here without updating it there leaves every pull request
+    # green and unmergeable for ever, waiting on a check that no longer exists.
     name: api (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
-      # Both legs, always. A failure on 24 is not made clearer by never hearing about 22.
+      # Both legs, always. A failure on the floor is not made clearer by never hearing about 26.
       fail-fast: false
       matrix:
-        node: ['22.12.0', '24']
+        node: ['24', '26']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

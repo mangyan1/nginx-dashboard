@@ -8,7 +8,7 @@ set -euo pipefail
 
 APP_DIR=/opt/nginx-dashboard
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-NODE_MIN=22
+NODE_MIN=24
 
 say() { echo -e "\033[1;34m[install]\033[0m $*"; }
 
