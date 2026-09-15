@@ -61,8 +61,9 @@ jobs:
       - run: npm ci
       # smoke.mjs boots the server in DRY mode against a fixture tree it generates itself, so this
       # needs no nginx, no root and no www-data — which is why it is the job that can run anywhere.
-      # safe-apply.mjs covers the mutation pipeline DRY mode never reaches, and client.mjs the
-      # framework-free client modules.
+      # safe-apply.mjs covers the mutation pipeline DRY mode never reaches, client.mjs the
+      # framework-free client modules, and docs.mjs the two doc claims that are decidable at all:
+      # a command the reader is told to run, and a node floor that lives in a shell script.
       - run: npm test
 
   dist:

@@ -11,7 +11,7 @@
     "start": "node server.js",
     "demo": "node scripts/demo.mjs",
     "totp:new": "node scripts/totp.mjs",
-    "test": "node test/smoke.mjs && node test/safe-apply.mjs && node test/client.mjs",
+    "test": "node test/docs.mjs && node test/smoke.mjs && node test/safe-apply.mjs && node test/client.mjs",
     "test:floor": "node test/version-floor.mjs",
     "test:docker": "node test/docker-conf.mjs",
     "test:e2e": "docker build -f test/Dockerfile.e2e -t nginx-dashboard-e2e . && docker run --rm nginx-dashboard-e2e"
