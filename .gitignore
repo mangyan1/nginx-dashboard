@@ -9,6 +9,9 @@ test/probe-*
 .env
 # Playwright MCP scratch dir — screenshots and snapshots from driving the UI locally
 .playwright-mcp/
+# Screenshots that land loose in the repo root while working on the UI. Root-anchored on
+# purpose: the brand assets under branding/ are part of the project and stay tracked.
+/*.png
 
 # Local-only working notes: an agent context handoff, the ops/secret policy, and the
 # architecture notes. All three are kept on disk for working here and are deliberately
