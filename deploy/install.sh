@@ -2,7 +2,7 @@
 # nginx-dashboard installer — idempotent: safe to re-run.
 # Checks every dependency; installs missing ones, upgrades outdated ones, then installs the app.
 #
-#   install.sh          the dashboard and what it needs (nginx, certbot, unzip, node)
+#   install.sh          the dashboard and what it needs (nginx, certbot, unzip, node, curl, rsync)
 #   install.sh --lemp   the above, plus MariaDB and PHP-FPM — see deploy/lemp.sh
 set -euo pipefail
 
@@ -70,6 +70,12 @@ ensure_apt_pkg() {
 
 # ---------- 1. system deps ----------
 say "checking system dependencies…"
+# curl and rsync are checked first because this script *uses* both before anything else installs
+# them: curl to fetch NodeSource, rsync to copy the tree in. On a server that has neither — a bare
+# Debian image has neither — the old order failed on line 37 with "curl: command not found", which
+# reads as a broken installer rather than a missing package.
+ensure_apt_pkg curl curl
+ensure_apt_pkg rsync rsync
 ensure_node
 ensure_apt_pkg nginx nginx
 ensure_apt_pkg certbot certbot

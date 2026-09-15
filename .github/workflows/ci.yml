@@ -3,9 +3,10 @@
 # sat for 24h0m5s and then died — so writing one would have been writing something that never ran.
 # Public repositories get runners for free, which is most of what going public bought.
 #
-# Three jobs, split by what each one needs rather than by module, so a red run names its own cause
+# Four jobs, split by what each one needs rather than by module, so a red run names its own cause
 # instead of "the test job failed": the API suites are plain Node, the build check needs only the
-# dev dependencies, and the nginx suite needs Docker.
+# dev dependencies, the nginx suite needs Docker, and the installer suite needs a distribution that
+# is not this one.
 #
 # Two things are deliberately absent. A release workflow, because `dist/` is committed and a tag
 # already gets GitHub's own source tarball, so an extra artifact would be a near-duplicate of one
@@ -105,3 +106,31 @@ jobs:
       - run: npm ci
       - run: npm run test:docker
       - run: npm run test:e2e
+
+  install:
+    # deploy/install.sh is the one thing here that runs on a server nobody chose, and until this job
+    # nothing ran it. The api job boots the server in DRY mode on software the runner already has;
+    # the nginx job has its packages baked into an image built on bookworm. Neither would notice the
+    # installer calling `curl` and `rsync` without ever installing them, which is what it did — a
+    # bare debian:12 image has neither, so a fresh install died on "curl: command not found".
+    #
+    # Debian 12 is the oldest release still getting security updates and the two Ubuntu LTS releases
+    # are what the README tells people to run. The version in test/Dockerfile.e2e is deliberately
+    # not one of them: that image is a test fixture, this matrix is the claim that installing works.
+    name: install (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    # apt, NodeSource and npm all over the network, three images side by side. The six-hour default
+    # would hide a hung container behind five hours of nothing.
+    timeout-minutes: 20
+    strategy:
+      # All three, always: "works on 24.04" is not made clearer by never hearing about 22.04.
+      fail-fast: false
+      matrix:
+        image: ['debian:12', 'ubuntu:22.04', 'ubuntu:24.04']
+    steps:
+      - uses: actions/checkout@v7
+      # Mounted, not copied, so install.sh sees the tree exactly as the operator's `scp -r .` would
+      # — dist/ included, since the installer refuses to install without it.
+      - run: docker run --rm -v "$PWD:/src" "$IMAGE" bash /src/test/install-container.sh
+        env:
+          IMAGE: ${{ matrix.image }}
