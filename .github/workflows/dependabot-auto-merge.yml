@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.actor == 'dependabot[bot]'
     steps:
-      - uses: dependabot/fetch-metadata@v2
+      - uses: dependabot/fetch-metadata@v3
         id: metadata
       # version-update:semver-patch | :semver-minor | :semver-major. A grouped pull request reports
       # its most significant member, so the npm group that carries one minor gets treated as one.
