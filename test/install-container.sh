@@ -36,9 +36,13 @@ bash "$SRC/deploy/install.sh"
 [ -f "$APP/node_modules/express/package.json" ] || fail "npm install --omit=dev left no express"
 [ -f "$UNIT" ] || fail "no systemd unit at $UNIT"
 
-# node >= the floor package.json declares, whether it was already there or came from NodeSource
+# node >= the floor the installer itself declares, whether node was already here or came from
+# NodeSource. Read out of install.sh rather than written here: a second copy of the number is a
+# second thing to forget, and test/version-floor.mjs checks that this one still has a matrix leg.
+NODE_MIN=$(sed -n 's/^NODE_MIN=//p' "$SRC/deploy/install.sh")
+[ -n "$NODE_MIN" ] || fail "no NODE_MIN in deploy/install.sh — cannot tell what node the installer promises"
 NODE_MAJOR=$(node -v | sed 's/^v\([0-9]*\).*/\1/')
-[ "$NODE_MAJOR" -ge 22 ] || fail "node $(node -v) is below the 22 package.json requires"
+[ "$NODE_MAJOR" -ge "$NODE_MIN" ] || fail "node $(node -v) is below the $NODE_MIN install.sh installs"
 
 # The generated password is the whole point of the unit-writing branch: a placeholder that ships in
 # this repository is refused by the app at startup, so an installer that leaves one installs a
