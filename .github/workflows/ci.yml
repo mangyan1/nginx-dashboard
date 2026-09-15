@@ -114,15 +114,15 @@ jobs:
     # installer calling `curl` and `rsync` without ever installing them, which is what it did — a
     # bare debian:12 image has neither, so a fresh install died on "curl: command not found".
     #
-    # Five images, in two roles. The release a server installs today — Debian 13 trixie, Ubuntu
-    # 26.04 — is where a fresh install breaks; the older releases still inside their support window
-    # are where an upgrade breaks, and that is most of the machines this actually runs on. Debian 13
-    # was the one missing first: a matrix framed around "oldest still supported" tests the box nobody
-    # has any more, since a new one is trixie. The node image in test/Dockerfile.e2e is deliberately
-    # not one of these — that is a test fixture, this matrix is the claim that installing works.
+    # Five images, in two roles. The release a server installs today — Debian 13 trixie, Ubuntu 26.04
+    # — is where a fresh install breaks; the older releases still inside their support window are
+    # where an upgrade breaks, and those are most of the machines this actually runs on. The first
+    # version of this matrix carried only the older ones, which is the wrong way round. The node
+    # image in test/Dockerfile.e2e is deliberately not one of these — that is a test fixture, this
+    # matrix is the claim that installing works.
     name: install (${{ matrix.image }})
     runs-on: ubuntu-latest
-    # apt, NodeSource and npm all over the network, three images side by side. The six-hour default
+    # apt, NodeSource and npm all over the network, five images side by side. The six-hour default
     # would hide a hung container behind five hours of nothing.
     timeout-minutes: 20
     strategy:
