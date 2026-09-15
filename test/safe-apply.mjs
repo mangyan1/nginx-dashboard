@@ -445,6 +445,36 @@ const prox = renderSiteConf({ ...defaultSite('p'), domains: ['p.test'], proxy: [
 check('a proxy rule speaks http/1.1 upstream', prox.includes('proxy_http_version 1.1;') && prox.includes('proxy_set_header Connection "";'))
 check('...and does not buffer the response', prox.includes('proxy_buffering off;'))
 
+// Verification is opt-in, and asking for it used to require a CA file of your own — so an upstream
+// with a publicly-signed certificate could not be verified at all. Silence is the thing to avoid:
+// `proxy_ssl_verify off` and no such directive mean the same to nginx, but only one of them says so.
+const httpsRow = { path: '/', target: 'https://10.0.0.2:8443' }
+const httpsSite = t => ({ ...defaultSite('v'), domains: ['v.test'], proxy: [{ ...httpsRow, ...t }] })
+const vDef = renderSiteConf(httpsSite({}))
+check('an https target is not verified unless asked', vDef.includes('proxy_ssl_verify off;'), vDef.split('\n').find(l => l.includes('proxy_ssl')))
+const vWant = httpsSite({ verify: true })
+check('asking for it is valid with no CA file', validateSite(vWant).length === 0, JSON.stringify(validateSite(vWant)))
+const vOn = renderSiteConf(vWant)
+check('...and verifies against the system trust store',
+  vOn.includes('proxy_ssl_verify on;') && vOn.includes('proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;'),
+  vOn.split('\n').filter(l => l.includes('proxy_ssl')).join(' | '))
+check('...allowing a root plus an intermediate', vOn.includes('proxy_ssl_verify_depth 2;'))
+const vOwn = renderSiteConf(httpsSite({ verify: true, ca: '/etc/ssl/private/own-ca.pem' }))
+check('a CA the operator gave is the one used',
+  vOwn.includes('proxy_ssl_trusted_certificate /etc/ssl/private/own-ca.pem;') && !vOwn.includes('ca-certificates.crt'))
+check('a malformed CA path is still refused',
+  validateSite(httpsSite({ verify: true, ca: '/etc/ssl/private/own ca.pem' })).some(e => e.includes('absolute path')))
+check('a plain-http target gets no proxy_ssl directives',
+  !renderSiteConf({ ...defaultSite('v'), domains: ['v.test'], proxy: [{ path: '/', target: 'http://10.0.0.2:8080', verify: true }] }).includes('proxy_ssl'))
+const poolSite = t => ({
+  ...defaultSite('v'), domains: ['v.test'],
+  upstreams: [{ name: 'app', algorithm: 'round_robin', healthCheck: false, servers: [{ scheme: 'https', host: '10.0.0.2', port: 8443 }] }],
+  proxy: [{ path: '/', target: 'upstream:app', ...t }],
+})
+check('the flag means the same on a backend pool',
+  renderSiteConf(poolSite({ verify: true })).includes('proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;')
+  && renderSiteConf(poolSite({})).includes('proxy_ssl_verify off;'))
+
 check('a typo in an ip rule is refused', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['192.168.1.0/24', 'not-an-ip'] } }).some(e => e.includes('invalid ip rule')))
 check('a blank ip rule row is not an error', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['192.168.1.0/24', ''] } }).length === 0)
 check('cidr and ipv6 rules are accepted', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['10.0.0.0/8', '::1/128', 'fe80::/10'] } }).length === 0)

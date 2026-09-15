@@ -70,6 +70,41 @@ The installer generates a random `DASH_PASSWORD` and prints it once.
 It's stored in `/etc/systemd/system/nginx-dashboard.service` — change it there,
 then `systemctl restart nginx-dashboard`.
 
+## Keeping nginx patched
+
+nginx comes from the distribution, not from this repository and not from
+nginx.org — that is deliberate, and it decides where the security fixes come
+from. Debian and Ubuntu patch the release they shipped in place, so the version
+number misleads on purpose: `1.22.1-9+deb12u9` is 1.22.1 with nine rounds of
+security backports on top, and holding `1.22.1` up against an upstream advisory
+will alarm you about bugs that were fixed months ago.
+
+The patch path is therefore apt's, not this repository's:
+
+- `install.sh` upgrades nginx when the distribution's candidate is newer than
+  what is installed, so re-running it picks the fixes up.
+- `unattended-upgrades` — on by default for the security pocket on both
+  distributions — is what keeps a box current with nobody logging in.
+- The header strip and Settings → Stack both print what `nginx -v` reports,
+  which is the only thing on the box that knows it.
+
+Two places the version matters more than usual:
+
+- **HTTP/3** (the per-site toggle) needs nginx ≥ 1.25, and every release from
+  1.25 up to 1.30.0 has an open HTTP/3 advisory (address spoofing). It is off
+  by default and worth leaving off until the distribution's nginx is past that.
+- **TLS session resumption** across sites sharing one IP and port was fixed in
+  1.26.3 / 1.27.4 (CVE-2025-23419). Debian 13 and Ubuntu 26.04 are past it;
+  older releases depend on the backport. Generated configs already set
+  `ssl_session_tickets off` regardless, which closes the ticket half of it.
+
+What the generator writes is deliberately narrow — no `rewrite`, `map`,
+`resolver`, `mp4`, `dav`, `ssi`, `charset` or `slice` appears in a vhost it
+renders, TLS 1.2 is the floor, session tickets are off — which is why most of
+the upstream advisory list is unreachable from the panel. Files you write by
+hand under **Sites → Files** are the exception: `nginx -t` checks those for
+syntax, never for advisories.
+
 ## Environment
 
 Everything is set in the systemd unit. The installer carries an existing

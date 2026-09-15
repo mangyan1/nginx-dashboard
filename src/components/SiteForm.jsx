@@ -515,7 +515,7 @@ function SiteEditor({ site, D, onSaved, onDeleted, onDirty }) {
           ))}
         </div>}
         <Toggle checked={s.listen.http2} onChange={v => upL({ http2: v })} label="HTTP/2" {...tog('listen.http2', v => upL({ http2: v }))} />
-        <Toggle checked={s.listen.http3} onChange={v => upL({ http3: v })} label="HTTP/3 (QUIC — needs nginx ≥ 1.25)" {...tog('listen.http3', v => upL({ http3: v }))} />
+        <Toggle checked={s.listen.http3} onChange={v => upL({ http3: v })} label="HTTP/3 (QUIC — nginx ≥ 1.25; below 1.30.1 an HTTP/3 advisory is open)" {...tog('listen.http3', v => upL({ http3: v }))} />
         <Toggle checked={s.listen.reuseport} onChange={v => upL({ reuseport: v })} label="reuseport (one accept queue per worker, on every listener of the port)" {...tog('listen.reuseport', v => upL({ reuseport: v }))} />
         <Toggle checked={s.staticCache.enabled} onChange={v => set({ enabled: v }, 'staticCache')} label="Browser caching for static files"
           {...tog('staticCache.enabled', v => set({ enabled: v }, 'staticCache'))} />
