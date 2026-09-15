@@ -1,0 +1,34 @@
+# Auto-merge for Dependabot, which does not have a setting for it: the repository-level switch only
+# allows auto-merge to be *turned on* for a pull request, and Dependabot never turns it on itself.
+#
+# Majors are left alone. Everything minor and below rides on the same gate as a hand-written change
+# now — main requires the four CI jobs — so auto-merge here means "merge when it is green", not
+# "merge now". That distinction is the whole reason branch protection had to be set up first: without
+# required checks, `gh pr merge --auto` on a repository with nothing to wait for merges immediately,
+# red or not.
+name: Dependabot auto-merge
+
+on: pull_request
+
+# Both scopes are load-bearing and neither is obvious. A run triggered by Dependabot gets a
+# read-only token no matter what the repository settings say, so `permissions` has to ask for more —
+# and `gh pr merge` is the mergePullRequest mutation underneath, which is a contents: write
+# operation, not a pull-requests one. Declaring only the latter is the 403 everybody hits.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - uses: dependabot/fetch-metadata@v2
+        id: metadata
+      # version-update:semver-patch | :semver-minor | :semver-major. A grouped pull request reports
+      # its most significant member, so the npm group that carries one minor gets treated as one.
+      - if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
