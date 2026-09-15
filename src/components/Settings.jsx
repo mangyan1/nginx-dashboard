@@ -275,9 +275,12 @@ export default function Settings({ status, theme, onTheme }) {
           </ul>
           <p className="sub">
             Every write keeps a snapshot of the conf files and the manifest, so the last twenty
-            changes can be undone from the Logs tab. Each snapshot carries the manifest too — the
-            upstream hosts it names are the internal network map — which is why clearing them is how
-            you hand the box over.
+            changes can be put back: <code>GET /api/history</code> lists them and{' '}
+            <code>POST /api/history/:id/revert</code> applies one, through the same tested pipeline
+            as any other write. There is no revert button here yet — this section counts the
+            snapshots and clears them. Each snapshot carries the manifest too — the upstream hosts
+            it names are the internal network map — which is why clearing them is how you hand the
+            box over.
           </p>
           <div className="actions">
             <Btn disabled={busy || !history} onClick={() => act(async () => {

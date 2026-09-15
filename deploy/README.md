@@ -15,7 +15,11 @@ ssh user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh'
 ```
 
 `install.sh` is idempotent — re-running it upgrades outdated dependencies
-(node, nginx, certbot, npm packages) and refreshes the app files.
+(node, nginx, certbot, curl, rsync, unzip) and refreshes the app files. The app's
+own npm dependencies are reinstalled from the lockfile, and only *reported* as
+outdated if they are: upgrading them on a server would make the installed tree
+differ from the one CI tested, so the lockfile decides and `npm outdated` says what
+is waiting.
 
 CI installs the whole thing onto a fresh Debian 12 and 13, Ubuntu 22.04, 24.04 and 26.04
 (`test/install-container.sh`): it runs the installer twice, boots what it installed, logs in
@@ -105,7 +109,7 @@ What the generator writes is deliberately narrow — no `rewrite`, `map`,
 `resolver`, `mp4`, `dav`, `ssi`, `charset` or `slice` appears in a vhost it
 renders, TLS 1.2 is the floor, session tickets are off — which is why most of
 the upstream advisory list is unreachable from the panel. Files you write by
-hand under **Sites → Files** are the exception: `nginx -t` checks those for
+hand under **Sites → nginx files** are the exception: `nginx -t` checks those for
 syntax, never for advisories.
 
 ## Environment

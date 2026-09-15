@@ -21,11 +21,12 @@
 
 Every editable control in the site form carries a **use default** chip naming the
 value the server would apply if the field were left alone. Clicking it writes that
-value; the chip greys out and reads "this is the default" when the field already
-holds it, so the same chip answers *what is the default* and *is this it*. The
+value; the chip greys out and its tooltip reads "this is the default" when the field
+already holds it, so the same chip answers *what is the default* and *is this it*. The
 values come from `GET /api/site-defaults`, not from a copy in the browser, so the
-chip cannot drift from the conf. A save that produces a warning or a refusal says
-so in a snackbar as well as in the panel — the panel scrolls, the snackbar does not.
+chip cannot drift from the conf. A save that is *refused* says so in a snackbar as
+well as in the panel — the panel scrolls, the snackbar does not; warnings stay in the
+panel, next to the field they belong to.
 
 The interface is a dark instrument panel in the NXD palette, with every number
 set in IBM Plex Mono. Archivo and IBM Plex Mono come from Google Fonts, so on a
@@ -49,7 +50,7 @@ poll, and asking again over the same state gives the same list.
 
 It is deliberately not a log. Nothing here is timestamped, nothing accumulates,
 and there is no history to scroll: the Logs tab has the access and error logs,
-and Settings → Undo history has what changed.
+and Settings → Maintenance counts the snapshots the writes keep, and clears them.
 
 The bell rings — a slow swing, resting for the second half of each cycle —
 whenever it has anything to report, and is still when it does not.
@@ -125,11 +126,13 @@ which is where the signal actually is.
   A *disabled* site is still tested — nginx only reads `sites-enabled`, so it is
   linked in for the test and unlinked again, keeping the error in the form you
   are looking at instead of saving it for Enable.
-- **Every successful change is undoable.** `GET /api/history` lists the last 20
-  changes (newest first, with the files each one touched);
+- **Every successful change is undoable over the API.** `GET /api/history` lists the
+  last 20 changes (newest first, with the files each one touched);
   `POST /api/history/:id/revert` puts them back — through the same pipeline, so a
   revert is tested and reloaded like anything else, and is itself undoable.
   Config and manifest only: reverting a deletion restores the conf, not the docroot.
+  The panel does not offer a revert button yet; Settings → Maintenance counts the
+  snapshots and clears them, which is the one history control there is.
 - **Hand edits are reported, not silently eaten.** The next click regenerates a
   site's `.conf` from the manifest, so an edit made outside the dashboard would
   vanish without a word. `GET /api/sites` returns `drift` per site
@@ -148,8 +151,9 @@ drift, and the panel consumes the script's own output instead of reimplementing
 it. That is also why a failure shows apt's error rather than a spinner that
 stops: you watch the step that broke.
 
-- **Opt-in and idempotent.** Without `--lemp` the installer is what it always
-  was, and a re-run changes nothing.
+- **Opt-in and idempotent.** Without `--lemp` the installer touches no database or
+  PHP package — that is what the flag gates. A re-run still refreshes the app files
+  and upgrades nginx, node, certbot, curl, rsync and unzip.
 - **The database goes first, and only if absent.** MariaDB is installed only
   when neither `mariadbd` nor `mysqld` is already on the box — pulling it in
   beside an operator's MySQL would leave two servers on one socket.
@@ -181,8 +185,9 @@ under *Reverse proxy*. PHP-FPM and anything else that speaks FastCGI is a
   404 rather than code handed to the interpreter.
 - **Front controller** sends unmatched paths to `/index.php` — that is the
   WordPress / Laravel / Drupal shape.
-- The **TLS port** is a field, not a constant: `listen 44306 ssl`, the QUIC
-  listener, the `Alt-Svc` header and the plain-HTTP redirect all follow it. A
+- The **TLS port** is a field, not a constant (default 443): set it to 8443 and
+  `listen 8443 ssl`, the QUIC listener, the `Alt-Svc` header and the plain-HTTP
+  redirect all follow it. A
   vhost can also be TLS-only (`serveHttp` off), and its `server_name` may be
   left blank — it then answers to anything arriving on that port.
 
@@ -212,7 +217,7 @@ the document root.
   request for `/` resolves to nothing and 403s.
 - **It refuses a box with no database server**, naming Settings → Stack. That
   check runs before the download, so a site that could not have been set up
-  anyway does not spend 25 MB finding out.
+  anyway does not spend a 64 MB download finding out.
 - The download URL arrives over the network and becomes files in a served
   directory, so it is checked to be `https` on `wordpress.org` before it is
   fetched, and capped in size both by `content-length` and by what actually
