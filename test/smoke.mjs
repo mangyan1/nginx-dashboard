@@ -456,11 +456,19 @@ try {
   // install is the one route here that can change the machine, so DRY refusing it is the point.
   const stack = await req('GET', '/api/stack')
   check('stack status answers', stack.status === 200 && stack.body.dry === true, JSON.stringify(stack.body))
-  // Asserted by name, not by count: unzip is present on some dev boxes and absent on others, so a
-  // length check would pass or fail on the platform rather than on the code.
-  check('...and reports the php and database halves missing, which they are here',
-    stack.body.missing.includes('PHP-FPM') && stack.body.missing.includes('a database server'),
-    JSON.stringify(stack.body.missing))
+  // Asserted as a mapping rather than as a list of what is absent here. What a box has installed is
+  // a property of the box: this dev machine has no php-fpm and no database server, while the CI
+  // runner ships nginx, php-fpm and mysql, so "these are missing" was never true everywhere — it
+  // passed on Windows and failed on Linux for a reason that had nothing to do with the code. What
+  // must hold on any box is the mapping, and that is the part actually worth testing: a label
+  // appears exactly when the row it names reports the thing absent.
+  const absent = {
+    nginx: !stack.body.nginx.present, 'PHP-FPM': !stack.body.php.endpoint,
+    'a database server': !stack.body.db.kind, unzip: !stack.body.unzip,
+  }
+  check('...and each missing label matches a row that really is absent',
+    Object.entries(absent).every(([label, gone]) => stack.body.missing.includes(label) === gone),
+    JSON.stringify({ missing: stack.body.missing, absent }))
   check('installing the stack is refused in dry mode',
     (await req('POST', '/api/stack/install')).status === 409)
   // `res.json`, then the SSE route, so a client that skips the POST cannot be left watching a stream
@@ -492,6 +500,11 @@ try {
   // difference between a vhost and the vhost you are reading the page through.
   const selfConf = path.join(FIX, 'nginx', 'sites-available', 'nxd.conf')
   const pub = await req('POST', '/api/sites', {
+    // The root is not optional here, even though the route will invent one. Left off, the site
+    // lands on the default `/var/www/nxd` and the route's `mkdirSync` creates a real directory
+    // outside the fixture tree — which on Windows became `D:\var\www\nxd` and passed, and on Linux
+    // is an EACCES under a root-owned /var/www. Every other site in this file names its root.
+    root: path.join(FIX, 'www', 'nxd'),
     name: 'nxd', domains: ['dash.test'], port: 8443, listenAddress: '127.0.0.1',
     proxy: [{ path: '/', target: `http://127.0.0.1:3123` }],
     ipRules: { mode: 'allowlist', ips: ['127.0.0.1/32', '192.168.0.0/16'] },
