@@ -802,6 +802,33 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024, files: 200 },
 })
 
+/**
+ * Give paths inside a document root to the web user, and say why if it will not.
+ *
+ * Everything this process writes is owned by root, and nginx only ever reads — so for the static
+ * sites this dashboard mostly manages, root-owned files are invisible. They stop being invisible the
+ * moment PHP is involved: php-fpm runs as www-data, and a tree it cannot write is one WordPress
+ * cannot put an upload in, replace a plugin in, or read a 0640 wp-config.php out of. Read bits are
+ * not the problem, which is why this is a chown and never a mode.
+ *
+ * Returns null when the paths now belong to www-data, else the reason chown gave. A sentence rather
+ * than a throw, so each caller can name the state it left behind and the way out — the shape
+ * `docrootRemovalRefusal` and `driftOf` already use.
+ *
+ * `recursive` is for the one caller that extracts an archive, whose paths cannot be listed; the
+ * others pass the leaf paths they just wrote, where walking the tree would be a pointless traversal.
+ */
+async function handToWebUser(paths, recursive = false) {
+  // Dry mode writes files and never touches the system — that is what `npm run demo` runs, on
+  // whatever machine is trying this dashboard out, where there is no php-fpm and on Windows no
+  // www-data to chown to. Ownership is system state, so it is skipped with the rest of it.
+  if (DRY) return null
+  const list = [].concat(paths).filter(Boolean)
+  if (!list.length) return null
+  const r = await shell('chown', [...(recursive ? ['-R'] : []), 'www-data:www-data', ...list], { timeout: 60_000 })
+  return r.status === 0 ? null : ((r.stderr || '').trim() || 'chown refused')
+}
+
 app.get('/api/sites/:name/files', (req, res) => {
   const site = findSite(req.params.name)
   if (!site) return res.status(404).json({ error: 'not found' })
@@ -817,15 +844,22 @@ app.get('/api/sites/:name/files', (req, res) => {
   }
 })
 
-app.post('/api/sites/:name/files', upload.array('files'), (req, res) => {
+app.post('/api/sites/:name/files', upload.array('files'), async (req, res) => {
   const site = findSite(req.params.name)
   if (!site) return res.status(404).json({ error: 'not found' })
   try {
     const dir = safeJoin(site.root, String(req.body.path || ''))
     fs.mkdirSync(dir, { recursive: true })
+    const written = []
     for (const f of req.files || []) {
-      fs.renameSync(f.path, path.join(dir, path.basename(f.originalname)))
+      const dest = path.join(dir, path.basename(f.originalname))
+      fs.renameSync(f.path, dest)
+      written.push(dest)
     }
+    // The directory as well as the files: `mkdirSync` above may have just made it, and one only root
+    // can write into is the same problem one level up.
+    const bad = await handToWebUser([dir, ...written])
+    if (bad) return res.status(400).json({ error: `${bad} — the files are in ${dir} but are still owned by root, so a PHP site cannot rewrite them` })
     res.json({ ok: true, count: (req.files || []).length })
   } catch (e) {
     res.status(400).json({ error: e.message })
@@ -843,6 +877,9 @@ app.post('/api/sites/:name/upload-zip', upload.single('zip'), async (req, res) =
     // unzip refuses absolute paths and .. by default, so zip-slip is contained to the docroot anyway
     const r = await shell('unzip', ['-o', req.file.path, '-d', dir])
     if (r.status !== 0) throw new Error(r.stderr.trim() || 'unzip failed')
+    // Recursive here, because what unzip wrote is a tree whose paths were never listed.
+    const bad = await handToWebUser(dir, true)
+    if (bad) return res.status(400).json({ error: `${bad} — the archive was extracted into ${dir} but is still owned by root, so a PHP site cannot rewrite it` })
     res.json({ ok: true })
   } catch (e) {
     res.status(400).json({ error: String(e.message).slice(0, 500) })
@@ -1012,20 +1049,11 @@ app.post('/api/sites/:name/wordpress', async (req, res) => {
     await writeWpConfig(src, { dbName: site.name, password })
 
     fs.cpSync(src, site.root, { recursive: true, force: true })
-    // The tree has to belong to the web user before it is any use. This process runs as root and
-    // cpSync copies mode but never ownership, so everything above lands root:root while php-fpm runs
-    // as www-data — and read alone is not enough, because WordPress creates wp-content/uploads and
-    // rewrites its own files, so a tree it cannot write serves a homepage and nothing else. `-R`
-    // because every directory it needs to write into is inside. The chmod below cannot substitute:
-    // 0640 root:root is unreadable to php-fpm however the bits are set. Hardcoded rather than
-    // detected, unlike the socket: www-data is the user on both platforms this targets and is a name
-    // that does not move between releases the way php8.3-fpm does.
-    const owned = await shell('chown', ['-R', 'www-data:www-data', site.root], { timeout: 60_000 })
-    if (owned.status !== 0) {
-      // No cleanup: the files are already in the docroot and the route refuses a retry while it is
-      // occupied, so the state after this is one the operator has to be told how to leave.
-      throw new Error(`${(owned.stderr || '').trim() || 'chown failed'} — WordPress was written to ${site.root} but is still owned by root, so php-fpm cannot read it. Delete the site with its document root, then create it again.`)
-    }
+    // Recursive: cpSync copies mode but never ownership, so the whole tree above landed root-owned.
+    // No cleanup on failure — the files are already in the docroot and the route refuses a retry
+    // while it is occupied, so the operator has to be told how to leave that state.
+    const bad = await handToWebUser(site.root, true)
+    if (bad) throw new Error(`${bad} — WordPress was written to ${site.root} but is still owned by root, so php-fpm cannot read it. Delete the site with its document root, then create it again.`)
     // not carried reliably by cpSync, and this is the file with the password in it
     fs.chmodSync(path.join(site.root, 'wp-config.php'), 0o640)
     // the placeholder would otherwise win the site's root URL: nginx resolves `/` through `index`,

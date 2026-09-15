@@ -78,6 +78,15 @@ which is where the signal actually is.
   the protected site than for everywhere else: an operator's basic-auth password
   is often one they have used before, and a root-readable file holding it in the
   clear is a leak of that password *for every other service it opens*.
+- **Everything this dashboard writes into a document root is chowned to
+  `www-data`.** It runs as root, and `cpSync`, `unzip` and a file manager upload
+  all produce root-owned files — invisible for a static site, because nginx only
+  reads, and fatal for a PHP one: php-fpm runs as `www-data` and cannot read a
+  0640 `wp-config.php`, create `wp-content/uploads`, or replace a plugin file.
+  Read bits are not the problem, so it is a chown and never a mode. The three
+  writers it covers are the WordPress download, the file upload and the zip
+  deploy. Dry mode skips it, with the rest of the system it does not touch — it
+  is what `npm run demo` runs, where there is no `www-data` to chown to.
 - The dashboard's own settings live beside it in `settings.json` (mode 0600):
   the second-factor secret and what a new site is created from. Kept out of the
   manifest on purpose — the undo history restores whole site objects, and a
@@ -188,11 +197,6 @@ the document root.
 
 - **The credentials live only in `wp-config.php`** (mode 0640). Nothing about
   them is written to the manifest or to settings.
-- **The tree is chowned to `www-data`** once it is in place. This dashboard runs
-  as root, so without that step every file lands root-owned and php-fpm cannot
-  read `wp-config.php` — the site cannot boot at all — nor create
-  `wp-content/uploads` afterwards. Read access alone is not enough, which is why
-  it is a recursive chown rather than a mode.
 - **All of it happens outside the config pipeline and outside the manifest**, in
   a scratch directory first — the document root is touched only once the
   download, the database and the config have all succeeded. A failure leaves a
