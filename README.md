@@ -17,7 +17,7 @@
 | **control** | start / stop / restart nginx, reload config (`nginx -s reload`), test config (`nginx -t`) |
 | **logs** | live tail of access.log & error.log (SSE), rotate, purge old rotated logs |
 | **metrics** | stub_status stats + live active-connections chart |
-| **settings** | the second factor (enrol, or turn off with the password), sign-in lockouts and clearing them, what a new site is created from, undo-history maintenance, dark/light, a dependency-version check, and a read-only view of where this install lives |
+| **settings** | the second factor (enrol, or turn off with the password), sign-in lockouts and clearing them, what a new site is created from, undo-history maintenance, dark/light, a dependency-version check, **installing the LEMP stack** with the installer's own output streaming live, and a read-only view of where this install lives |
 
 Every editable control in the site form carries a **use default** chip naming the
 value the server would apply if the field were left alone. Clicking it writes that
@@ -130,6 +130,36 @@ which is where the signal actually is.
   dashboard-owned `/etc/nginx/conf.d/00-dashboard.conf`. `nginx.conf` is
   never touched.
 
+## The stack
+
+nginx is assumed. The rest of it — PHP-FPM and a database — is installed by
+`deploy/install.sh --lemp`, and afterwards from **Settings → Stack**. Both run
+the same `deploy/lemp.sh`, so there is one package list rather than two that can
+drift, and the panel consumes the script's own output instead of reimplementing
+it. That is also why a failure shows apt's error rather than a spinner that
+stops: you watch the step that broke.
+
+- **Opt-in and idempotent.** Without `--lemp` the installer is what it always
+  was, and a re-run changes nothing.
+- **The database goes first, and only if absent.** MariaDB is installed only
+  when neither `mariadbd` nor `mysqld` is already on the box — pulling it in
+  beside an operator's MySQL would leave two servers on one socket.
+- **PHP is installed unversioned and then detected.** `php-fpm` and the
+  extensions, then the socket is found under `/run/php/`. Nothing hardcodes
+  `php8.3-fpm`, which is a name that moves between Ubuntu releases.
+- **It ends with one machine-readable line** — `NXD-LEMP socket=… php=… db=…
+  svc=…` — which is what the panel parses rather than re-deriving. `--detect`
+  prints that line, changes nothing and needs no root; it is what the panel reads
+  every time the tab is opened, so the rows describe the box rather than a
+  remembered guess.
+- **A detected socket is what makes the WordPress option work.** Prefilling
+  `php.enabled` without an endpoint is refused by validation, so the two are
+  filled together or not at all.
+- **Nothing can roll back an `apt-get`.** Success is shown by re-reading the rows
+  afterwards rather than asserted, and the outcome is kept in `settings.json` so
+  it survives a reload. The panel says so rather than offering an undo it cannot
+  perform.
+
 ## Dynamic backends
 
 Any HTTP app — Node, Python, a container, a remote instance — is a **proxy rule**
@@ -171,6 +201,9 @@ the document root.
   `try_files`, which serves `wp-config.php` as *plain text*; without the front
   controller every permalink 404s; and without `index.php` in the index list a
   request for `/` resolves to nothing and 403s.
+- **It refuses a box with no database server**, naming Settings → Stack. That
+  check runs before the download, so a site that could not have been set up
+  anyway does not spend 25 MB finding out.
 - The download URL arrives over the network and becomes files in a served
   directory, so it is checked to be `https` on `wordpress.org` before it is
   fetched, and capped in size both by `content-length` and by what actually
