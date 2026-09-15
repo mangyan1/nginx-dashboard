@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { ask } from '../confirm.jsx'
 import { Btn, fmtSize } from './ui.jsx'
 
 export default function FileManager({ siteName }) {
@@ -16,7 +17,7 @@ export default function FileManager({ siteName }) {
 
   const go = rel => load(rel === '..' ? (dir.split('/').slice(0, -1).join('/') || '.') : (dir === '.' ? rel : `${dir}/${rel}`))
   const del = async name => {
-    if (!confirm(`Delete ${name}?`)) return
+    if (!(await ask({ title: `Delete ${name}?`, body: 'A folder takes everything inside it with it. This cannot be undone.', go: 'Delete', danger: true }))) return
     await api('DELETE', `/api/sites/${siteName}/files?path=${encodeURIComponent(dir === '.' ? name : `${dir}/${name}`)}`)
     load(dir)
   }

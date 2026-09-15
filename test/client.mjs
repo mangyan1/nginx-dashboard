@@ -1,10 +1,12 @@
-// The client's two framework-free modules: the chip's answer to "is this the default?" (which
-// decides whether it offers to write a value or greys out and says the field already holds it) and
-// the snackbar store. Plain node: neither imports React.
+// The client's framework-free modules: the chip's answer to "is this the default?" (which decides
+// whether it offers to write a value or greys out and says the field already holds it), the snackbar
+// store, and the one line each route reports when it succeeds. Plain node: none of them imports
+// React.
 //   node test/client.mjs
 import assert from 'node:assert/strict'
 import { at, isDefault, fmt, short } from '../src/defaults.js'
 import * as toast from '../src/toast.js'
+import { said } from '../src/api.js'
 
 let n = 0
 const check = (name, fn) => { fn(); n++; console.log(`  ok  ${name}`) }
@@ -93,6 +95,34 @@ check('a toast with nothing to say is never pushed', () => {
   // a route with no message must not leave an empty box on screen for five seconds
   assert.equal(toast.ok(''), undefined)
   assert.equal(toast.snapshot().length, 0)
+})
+
+check('an action is reported as what happened, not as the button that was pressed', () => {
+  // every one of these is a button whose label is the verb, so echoing the route name back is the
+  // click reporting itself — which reads as it having failed to register
+  for (const [act, line] of [
+    ['start', 'nginx started'], ['stop', 'nginx stopped'], ['restart', 'nginx restarted'],
+    ['reload', 'nginx reloaded'], ['test', 'config is valid'],
+  ]) assert.equal(said('POST', `/api/nginx/${act}`), line, act)
+  // a site's verbs already read this way, and they are the shape the rest are matched against
+  assert.equal(said('PUT', '/api/sites/shop', { site: { name: 'shop' } }), 'site shop saved and applied')
+  assert.equal(said('POST', '/api/sites/shop/enable'), 'site shop enabled')
+  assert.equal(said('POST', '/api/logs/rotate'), 'logs rotated')
+  // Without its own branch this falls through to "site shop saved and applied", which is a
+  // different action entirely — so the version in the line is the point, not decoration.
+  assert.equal(said('POST', '/api/sites/shop/wordpress', { version: '6.7.1' }), 'WordPress 6.7.1 is in the document root')
+  // The stack install says nothing: the panel streams apt's own output and shows the verdict
+  // beneath it, so a toast would be the same news a third time.
+  assert.equal(said('POST', '/api/stack/install', { ok: true }), '')
+  // A plain delete is byte-identical to before — this is the assertion that keeps the `?root=1`
+  // clause from leaking into every delete's toast.
+  assert.equal(said('DELETE', '/api/sites/shop'), 'site shop deleted')
+  // The query string is stripped before the route is matched, so `?root=1` does not change which
+  // branch answers — and the clause rides on `output`, which only the removal sets.
+  assert.equal(said('DELETE', '/api/sites/shop?root=1', { ok: true, output: 'the document root /var/www/shop was removed' }),
+    'site shop deleted, the document root /var/www/shop was removed')
+  assert.equal(said('DELETE', '/api/sites/shop?root=1', { ok: true, output: 'dry mode — the document root /var/www/shop was not removed' }),
+    'site shop deleted, dry mode — the document root /var/www/shop was not removed')
 })
 
 check('dismissing one that is already gone changes nothing', () => {

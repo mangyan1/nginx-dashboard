@@ -32,6 +32,30 @@ set in IBM Plex Mono. Archivo and IBM Plex Mono come from Google Fonts, so on a
 host with no outbound internet the browser falls back to system fonts — the
 layout does not depend on them.
 
+## The bell
+
+The header carries a bell that counts what is currently wrong, worst first:
+nginx not running, a conf deleted or edited by hand, a dangling `sites-enabled`
+symlink, an address locked out of sign-in, a pending kernel update that wants a
+reboot, an installed package the running process has not loaded yet, and a
+dependency the registry has moved on. Each item names the tab the fix lives on
+and takes you there; a reboot has nowhere to send you and so has no button.
+
+**Nothing is stored and nothing is acknowledged.** An item is a fact about right
+now, so it stops being an item when the fact is fixed rather than when you press
+something — a remembered "read" flag would be a way to hide a broken conf, which
+is the one thing a notification must never do. The count is recomputed on every
+poll, and asking again over the same state gives the same list.
+
+It is deliberately not a log. Nothing here is timestamped, nothing accumulates,
+and there is no history to scroll: the Logs tab has the access and error logs,
+and Settings → Undo history has what changed.
+
+The bell rings — a slow swing, resting for the second half of each cycle —
+whenever it has anything to report, and is still when it does not.
+`prefers-reduced-motion` drops the swing and keeps the badge and the colour,
+which is where the signal actually is.
+
 ## How it works
 
 - Every site the dashboard creates is stored in a JSON manifest
@@ -69,6 +93,23 @@ layout does not depend on them.
   one thing that can change is a hand-written manifest entry that omits a field
   altogether — the read side fills the gap, which shows up as a red **drift** chip
   on that site the next time you open it.
+- **Deleting a site can take its document root with it**, opt-in. The dialog names
+  the path and offers a checkbox; unticked, the delete is what it always was —
+  conf and symlink removed, files left alone. Ticked, `DELETE /api/sites/:name?root=1`
+  removes the directory *after* the conf change has been applied and tested, never
+  inside that transaction: the rollback restores files byte-for-byte and a directory
+  cannot be one of them, so a removal in there would bring the site back with no
+  files — the exact state the pipeline exists to prevent. If the removal itself
+  fails the site is still deleted and the toast says the files remain.
+- **A recursive delete needs a guard, because the document root is free text.**
+  `ROOT_RE` accepts `/`, `/etc` and `/var/www` and creating a site will `mkdirSync`
+  any of them, so `rm -rf` on that validation alone is one typo away. Refused: a
+  blank or relative path; anything that is a symlink or sits under one (it would
+  delete whatever it points at); the filesystem root or one step below it; anything
+  overlapping nginx's own directories, the dashboard's state, or the dashboard
+  itself, in either direction; and any path that is another site's root, in either
+  direction — `/var/www` holding `/var/www/b` is refused both ways round. The
+  refusals are a 400 that writes nothing.
 - Every change goes through one pipeline: write file → `nginx -t` →
   on failure restore the previous file byte-for-byte and show the error →
   on success `nginx -s reload`. A config nginx rejects can never reach nginx.
@@ -105,6 +146,35 @@ under *Reverse proxy*. PHP-FPM and anything else that speaks FastCGI is a
   listener, the `Alt-Svc` header and the plain-HTTP redirect all follow it. A
   vhost can also be TLS-only (`serveHttp` off), and its `server_name` may be
   left blank — it then answers to anything arriving on that port.
+
+### WordPress
+
+A new site can start **blank** or as **WordPress**, and any site with PHP on can
+be given one later with the **Download WordPress** button. Either way it is
+`POST /api/sites/:name/wordpress`, which fetches the current release from
+`api.wordpress.org`, creates a database and user, writes `wp-config.php` with the
+credentials and salts from WordPress's own endpoint, and extracts the tree into
+the document root.
+
+- **The credentials live only in `wp-config.php`** (mode 0640). Nothing about
+  them is written to the manifest or to settings.
+- **All of it happens outside the config pipeline and outside the manifest**, in
+  a scratch directory first — the document root is touched only once the
+  download, the database and the config have all succeeded. A failure leaves a
+  working site with nothing half-written in it.
+- **It refuses a document root that already holds anything**, unless that is only
+  the placeholder page this dashboard itself wrote. Extracting over an operator's
+  files is the one irreversible thing here, so it is a 409 naming what is in the
+  way rather than a question.
+- **It refuses a site that is not configured to serve PHP**, and the refusal names
+  all three facts at once: with PHP off the emitter falls back to a static
+  `try_files`, which serves `wp-config.php` as *plain text*; without the front
+  controller every permalink 404s; and without `index.php` in the index list a
+  request for `/` resolves to nothing and 403s.
+- The download URL arrives over the network and becomes files in a served
+  directory, so it is checked to be `https` on `wordpress.org` before it is
+  fetched, and capped in size both by `content-length` and by what actually
+  arrived. The SQL goes to the client as a single argument, never a shell string.
 
 Hardening emitted for every site: dotfiles denied (`location ~ /\.(?!well-known)`)
 in both blocks, TLS 1.2+ only, `ssl_session_tickets off`, and a shared session
@@ -157,7 +227,8 @@ proxy rule wins and the fallback stands down.
   from another session cannot leave this page asking for a password alone.
 - Binds to `127.0.0.1:7412` — reach it via SSH tunnel, or publish its own vhost.
 - **Dependencies can be updated from Settings → Updates**, checked against the
-  npm registry when that tab is opened. Only the two packages the server itself
+  npm registry when that tab is opened, and cached for six hours so the bell can
+  read the same answer without asking again. Only the two packages the server itself
   loads are installable there; the rest are compiled into `dist/` when the page
   is built, so npm moving one on the server would change nothing that is served
   and those rows are marked `build-time`. An install is verified before it is
@@ -166,6 +237,12 @@ proxy rule wins and the fallback stands down.
   Applying it needs **Restart dashboard**, which is only offered when systemd is
   supervising the process (`INVOCATION_ID`) — it signs you out, because sessions
   are in memory.
+- **A placeholder password refuses to start.** `change-me` (the shipped unit's own
+  value), `changeme`, `demo`, `password` and `admin` are refused at boot with the
+  command that fixes them, because the install that ends up with one is the one
+  whose unit file was copied and never edited — and its operator is reading
+  `systemctl status`, not a log. `DASH_DEMO=1` is the deliberate way past it and
+  nothing in `deploy/` sets it; `npm run demo` does.
 - Anyone with the password effectively has root: keep it strong.
 
 ### Reaching it from the LAN
@@ -229,7 +306,12 @@ If you have lost the password too, set a new `DASH_PASSWORD` in the unit and res
 npm install
 npm run build   # build the frontend
 npm run dev     # or: Vite dev server at :5173, proxies /api to :7412 (or $DASH_PORT)
+npm run demo    # the whole dashboard on this machine, nothing to configure: http://127.0.0.1:7412, password `demo`
 ```
+
+`npm run demo` is DRY mode against its own `.demo/` tree, so it never touches nginx,
+systemctl, certbot or a real install's manifest. It is the only thing that sets
+`DASH_DEMO=1`, which is what lets a placeholder password start at all — see below.
 
 See `deploy/README.md` for deployment (installer script, systemd unit, dev/dry
 mode).

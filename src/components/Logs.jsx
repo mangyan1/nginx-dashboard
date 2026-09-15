@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import { ask } from '../confirm.jsx'
 import { Btn, Out, useAsync } from './ui.jsx'
 
 const MAX_LINES = 500
@@ -54,7 +55,7 @@ export default function Logs() {
   const doRotate = async () => setResult(await rotate().catch(e => ({ ok: false, output: e.message })))
   const doPurge = async () => {
     // irreversible: the rotated files are deleted, not archived
-    if (!confirm('Delete rotated log files older than 30 days? This cannot be undone.')) return
+    if (!(await ask({ title: 'Delete rotated logs?', body: 'Everything older than 30 days. The files are deleted, not archived, and this cannot be undone.', go: 'Delete', danger: true }))) return
     setResult(await purge(30).catch(e => ({ ok: false, output: e.message })))
   }
 

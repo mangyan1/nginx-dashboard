@@ -5,6 +5,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import multer from 'multer'
 import { spawn } from 'node:child_process' // tail -F for SSE; args are a fixed array, never user strings
+import { fileURLToPath } from 'node:url'
 import {
   PATHS, MANIFEST, HTTP_CONF, mkdirs, validName, safeJoin, safeApply,
   nginxTest, systemctl, shell, listHistory, clearHistory, revertHistory, readHistoryEntry,
@@ -13,7 +14,7 @@ import {
 import {
   SELF_NAME, isSelf, defaultSite, readManifest, writeManifest, siteConfPath, enabledConfPath, certDir,
   renderHttpConf, renderSiteConf, writeHtpasswd, hashUserRows, validateSite, driftOf, httpConfDrift,
-  parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors,
+  parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors, docrootRemovalRefusal,
 } from './lib/manifest.js'
 import { b32decode, newSecret, otpauth, totpValid } from './lib/totp.js'
 
@@ -62,6 +63,22 @@ let TOTP_SECRET = process.env.DASH_TOTP_SECRET || readSettings().totpSecret || '
 
 if (!PASSWORD) {
   console.error('Set DASH_PASSWORD env var before starting.')
+  process.exit(1)
+}
+
+// A password that is printed in this repository is not a password, and the failure this catches is
+// not a careless operator — it is a unit file that was copied and never edited, which is exactly
+// what deploy/install.sh used to leave behind. Refused rather than warned about, because the person
+// in that position is reading `systemctl status`, not a log they have no reason to open.
+// DASH_DEMO=1 is the deliberate way past it, and only `npm run demo` sets that.
+const PLACEHOLDERS = new Set(['change-me', 'changeme', 'demo', 'password', 'admin'])
+if (PLACEHOLDERS.has(PASSWORD.trim().toLowerCase()) && process.env.DASH_DEMO !== '1') {
+  console.error(
+    `DASH_PASSWORD is "${PASSWORD}", a placeholder that ships in this repository.\n` +
+    `Set a real one in /etc/systemd/system/nginx-dashboard.service:\n` +
+    `    Environment=DASH_PASSWORD=$(openssl rand -hex 12)\n` +
+    `then: systemctl daemon-reload && systemctl restart nginx-dashboard\n` +
+    `A throwaway dashboard on purpose is \`npm run demo\`, which sets DASH_DEMO=1.`)
   process.exit(1)
 }
 
@@ -261,13 +278,17 @@ async function selfRepair() {
 }
 
 // ---------- module 1: server control ----------
+// `dry` is this dashboard's own state rather than nginx's, but it is the same question — is nginx
+// serving? — and it is a question two places now ask, so they ask it once.
+async function nginxState() {
+  if (DRY) return 'dry'
+  const r = await shell('systemctl', ['is-active', 'nginx'])
+  return r.status === 0 ? r.stdout.trim() : r.stderr.trim()
+}
+
 app.get('/api/status', async (req, res) => {
   const v = await shell('nginx', ['-v'])
-  let active = 'dry'
-  if (!DRY) {
-    const r = await shell('systemctl', ['is-active', 'nginx'])
-    active = r.status === 0 ? r.stdout.trim() : r.stderr.trim()
-  }
+  const active = await nginxState()
   // `nginx -v` prints to stderr. When the binary is missing that slot holds ENOENT text
   // instead, which the UI would render as the version — so only send it when it is one.
   const raw = (v.stderr || v.stdout).trim()
@@ -286,6 +307,100 @@ app.get('/api/status', async (req, res) => {
       .sort((a, b) => (a.family === 'IPv6' ? 1 : 0) - (b.family === 'IPv6' ? 1 : 0))
       .map(i => ({ address: i.address, family: i.family === 'IPv6' ? 6 : 4 })),
   })
+})
+
+// Debian and Ubuntu write these when an upgrade put a new kernel or libc on disk that the running
+// system is not using yet. That is the OS's own answer to "needs a reboot", which is why the
+// dashboard does not try to work one out for itself — and why the file being absent (every non-
+// Debian host, and this one under a dev run on Windows) correctly means nothing to report.
+const REBOOT_REQUIRED = '/var/run/reboot-required'
+
+/**
+ * What the bell has to say, derived from state this process can already see. Nothing is stored and
+ * nothing is acknowledged: an item is a fact about right now, so it stops being an item when the
+ * fact is fixed rather than when a button is pressed. A stored "read" flag would be a way to hide a
+ * broken conf, which is the one thing a notification must never be able to do.
+ *
+ * `tab` is where the fix lives, or '' when there is nothing to click — a reboot has no tab, and a
+ * dead end styled as a link is worse than plain text.
+ */
+app.get('/api/notifications', async (req, res) => {
+  const items = []
+  const say = (id, kind, title, detail, tab = '') => items.push({ id, kind, title, detail, tab })
+
+  const state = await nginxState()
+  if (state !== 'active' && state !== 'dry')
+    say('nginx-down', 'err', 'nginx is not running',
+      `systemctl says "${state}" — nothing is being served until it starts`, 'control')
+
+  const m = readManifest()
+  for (const s of m.sites) {
+    const d = driftOf(s)
+    if (d === 'missing')
+      say(`drift-missing-${s.name}`, 'err', `${s.name}: its conf is gone from disk`,
+        'the site is in the manifest and sites-available has no file for it — the next restart of nginx will not find it', 'sites')
+    else if (d === 'modified')
+      say(`drift-modified-${s.name}`, 'warn', `${s.name}: conf edited outside the dashboard`,
+        'the next save from here rewrites the file and those edits are gone', 'sites')
+  }
+  if (httpConfDrift(m.sites))
+    say('drift-http', 'warn', 'the shared http conf was edited outside the dashboard',
+      'upstreams and rate-limit zones live in conf.d/00-dashboard.conf; saving any site rewrites it', 'sites')
+
+  // Ranked above every site problem above it, because this is the one file fault that stops nginx
+  // from starting at all rather than stopping one site from working.
+  for (const e of listNginxFiles().enabled.filter(e => !e.resolves))
+    say(`dangling-${e.name}`, 'err', `sites-enabled/${e.name} points at nothing`,
+      'nginx will not start while that entry is there — remove it, or restore the file it names', 'sites')
+
+  const locked = [...FAILS.values()].filter(f => f.until > Date.now()).length
+  if (locked)
+    say('locked', 'warn', `${locked} address${locked === 1 ? '' : 'es'} locked out`,
+      'too many failed sign-ins; each clears itself, or clear them from Settings', 'settings')
+
+  if (fs.existsSync(REBOOT_REQUIRED)) {
+    // The .pkgs file is written alongside it but is not guaranteed, and an item that vanishes
+    // because a second file is missing would be a strange failure for the operator to meet.
+    let pkgs = []
+    try { pkgs = fs.readFileSync(`${REBOOT_REQUIRED}.pkgs`, 'utf8').trim().split('\n').filter(Boolean) } catch {}
+    say('reboot', 'warn', 'the server needs a reboot',
+      pkgs.length ? `installed but not running yet: ${pkgs.join(', ')}` : 'a kernel or library update is installed and not in use')
+  }
+
+  // An update that has been installed and not loaded. This is the one case the Updates panel cannot
+  // report after its tab has been closed: the old code is still serving requests, and nothing on
+  // screen says so. BOOT_VERSIONS is what this process is running; installedVersion reads the disk.
+  const stale = RUNTIME_DEPS().filter(n => {
+    const now = installedVersion(n)
+    return BOOT_VERSIONS[n] && now && now !== BOOT_VERSIONS[n]
+  })
+  if (stale.length)
+    say('restart', 'warn', 'an update is installed but not loaded',
+      `${stale.map(n => `${n} ${BOOT_VERSIONS[n]} → ${installedVersion(n)}`).join(', ')} — restart the dashboard to load it`, 'settings')
+
+  // The registry is the only thing in this route that leaves the machine, so it is never allowed to
+  // hold up the answer: on a cold cache the check is started and this response goes out without it,
+  // and the next poll has it. The bell has to open instantly on the box where everything is broken,
+  // and that is exactly the box where an outbound lookup is the slowest thing here — eight seconds a
+  // package, on the screen the operator opened to find out why they are down.
+  if (UPDATE_CACHE.data) {
+    const { packages } = UPDATE_CACHE.data
+    const behind = packages.filter(p => p.updatable && p.latest && p.installed && p.latest !== p.installed)
+    if (behind.length)
+      say('updates', 'info', `${behind.length} package update${behind.length === 1 ? '' : 's'} available`,
+        behind.map(p => `${p.name} ${p.installed} → ${p.latest}`).join(', '), 'settings')
+  } else if (!UPDATE_PENDING) {
+    UPDATE_PENDING = true
+    checkUpdates(true).catch(() => {}).finally(() => { UPDATE_PENDING = false })
+  }
+
+  // Severity, not the order they were discovered in: the list is read from the top on a phone, and
+  // the one item that has to be seen is the one that has to be first. Array#sort is stable, so
+  // within a kind the manifest's own order survives.
+  const RANK = { err: 0, warn: 1, info: 2 }
+  items.sort((a, b) => RANK[a.kind] - RANK[b.kind])
+
+  res.json({ items })
 })
 
 /**
@@ -551,6 +666,23 @@ app.put('/api/sites/:name', async (req, res) => {
   res.json({ ok: true, site, ...warningPayload(site) })
 })
 
+/**
+ * The document-root half of a delete, as one clause for the toast. Never throws: by the time this
+ * runs the site is already gone, and a failed `rmSync` must not turn a completed deletion into an
+ * error that reads as "nothing happened".
+ */
+function removeRootOutput(root) {
+  // Dry mode is the demo, whose document roots are real absolute paths outside its throwaway tree.
+  if (DRY) return `dry mode — the document root ${root} was not removed`
+  if (!fs.existsSync(root)) return `nothing to remove at ${root}`
+  try {
+    fs.rmSync(root, { recursive: true, force: true })
+    return `the document root ${root} was removed`
+  } catch (e) {
+    return `but the document root ${root} could not be removed (${e.message}) — the files are still there`
+  }
+}
+
 app.delete('/api/sites/:name', async (req, res) => {
   const { name } = req.params
   // The one deletion that removes the page the operator is looking at. Refused rather than
@@ -559,7 +691,21 @@ app.delete('/api/sites/:name', async (req, res) => {
     return res.status(403).json({ error: `"${name}" is this dashboard's own vhost — deleting it would take away the page you are clicking on.\n\n${SELF_RECOVERY}` })
   }
   const m = readManifest()
-  if (!m.sites.some(s => s.name === name)) return res.status(404).json({ error: 'not found' })
+  const site = m.sites.find(s => s.name === name)
+  if (!site) return res.status(404).json({ error: 'not found' })
+
+  // Only asked for when the delete dialog's box was ticked. Everything below is skipped otherwise,
+  // so a plain delete is byte-for-byte what it was.
+  const withRoot = req.query.root === '1'
+  // Both refusals, before a single file is written — a 400 here has to leave the site and its files
+  // exactly as they were. Dry mode is checked *first* on purpose: the demo's document roots are real
+  // absolute paths, so a guard that passed would put `rmSync` on real disk during `npm run demo`.
+  // This refuses the *removal*, never the site deletion, so the demo still deletes sites.
+  if (withRoot && !DRY) {
+    const refusal = docrootRemovalRefusal(site.root, m.sites, name)
+    if (refusal) return res.status(400).json({ error: refusal })
+  }
+
   m.sites = m.sites.filter(s => s.name !== name)
   const result = await apply([...siteFiles(name), enabledConfPath(name)], () => {
     writeManifest(m)
@@ -568,7 +714,13 @@ app.delete('/api/sites/:name', async (req, res) => {
     fs.writeFileSync(HTTP_CONF, renderHttpConf(m.sites))
   }, { label: `delete site ${name}` })
   if (!result.ok) return res.status(422).json({ error: result.output })
-  res.json({ ok: true })
+
+  // After apply(), never inside it: safeApply rolls back by restoring byte-for-byte copies of the
+  // files it was handed, and a directory cannot enter `backups` — so a removal in there would roll
+  // the site's conf and manifest back while its files stayed gone, which is the exact state the
+  // transaction exists to prevent. `revertHistory` cannot help either; it is a config history.
+  const output = withRoot ? removeRootOutput(site.root) : undefined
+  res.json(output ? { ok: true, output } : { ok: true })
 })
 
 // Express 5 (path-to-regexp 8) dropped inline regex params, so `:toggle(enable|disable)`
@@ -697,6 +849,181 @@ app.post('/api/sites/:name/upload-zip', upload.single('zip'), async (req, res) =
   } finally {
     fs.rmSync(req.file.path, { force: true })
   }
+})
+
+// ---------- module 3b: WordPress ----------
+
+const WP_META_URL = 'https://api.wordpress.org/core/version-check/1.7/'
+const WP_SALT_URL = 'https://api.wordpress.org/secret-key/1.1/salt/'
+const WP_MAX_ZIP = 64 * 1024 * 1024
+// exactly what POST /api/sites writes into a fresh docroot, and nothing else
+const WP_PLACEHOLDER = /^\s*<h1>[^<]*<\/h1>\s*<p>Deployed via nginx-dashboard\.<\/p>\s*$/
+
+/**
+ * `null` when the docroot is empty or holds only the placeholder the create route wrote, else a
+ * description of what is there. Extracting over an operator's real files is the one irreversible
+ * mistake this route can make, so "occupied" is decided by reading the file, not by counting.
+ */
+function docrootOccupied(root) {
+  let names
+  try { names = fs.readdirSync(root) } catch { return null } // no docroot is not an occupied one
+  if (!names.length) return null
+  if (names.length === 1 && names[0] === 'index.html') {
+    try {
+      if (WP_PLACEHOLDER.test(fs.readFileSync(path.join(root, 'index.html'), 'utf8'))) return null
+    } catch { /* unreadable is not empty */ }
+  }
+  return names.slice(0, 8).join(', ') + (names.length > 8 ? ` and ${names.length - 8} more` : '')
+}
+
+/**
+ * The release metadata and the archive, from wordpress.org's own version service. No version
+ * constant anywhere, and `wordpress.org/latest.zip` is deliberately unused: it redirects but does
+ * not say what it is, so the version reported to the operator would be a guess.
+ */
+async function fetchWordpress() {
+  const meta = await fetch(WP_META_URL, { signal: AbortSignal.timeout(20_000) })
+  if (!meta.ok) throw new Error(`wordpress.org answered ${meta.status} for the version list`)
+  const { offers } = await meta.json()
+  if (!Array.isArray(offers) || !offers.length) throw new Error('wordpress.org sent no releases')
+  const { version, download } = offers.find(o => o.locale === 'en_US' && o.response === 'upgrade') || offers[0]
+  // This URL arrives over the network and this route turns it into files in a served directory.
+  const url = new URL(String(download || ''))
+  if (url.protocol !== 'https:' || !/(^|\.)wordpress\.org$/.test(url.hostname)) {
+    throw new Error(`wordpress.org offered a download from ${url.origin}, which is not wordpress.org`)
+  }
+  const zip = await fetch(url, { signal: AbortSignal.timeout(120_000) })
+  if (!zip.ok) throw new Error(`the download answered ${zip.status}`)
+  // content-length is a claim, so the same cap is applied again to what actually arrived
+  if (Number(zip.headers.get('content-length') || 0) > WP_MAX_ZIP) throw new Error('the download is larger than this route will write')
+  const buf = Buffer.from(await zip.arrayBuffer())
+  if (buf.length > WP_MAX_ZIP) throw new Error(`the download was ${Math.round(buf.length / 1048576)} MB, larger than this route will write`)
+  return { version: String(version || ''), buf }
+}
+
+const WP_SALTS = ['AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT']
+
+/**
+ * wp-config.php, from the sample WordPress ships, with the database and eight fresh salts.
+ *
+ * The salts come from WordPress's own endpoint rather than from `crypto` here — it is the canonical
+ * source and the format is theirs. Every substitution uses a function replacer, so a value holding
+ * `$&` cannot be read as a backreference; and a line the sample does not have throws, rather than
+ * quietly leaving "put your unique phrase here" in a file the site serves.
+ */
+async function writeWpConfig(dir, { dbName, password }) {
+  const r = await fetch(WP_SALT_URL, { signal: AbortSignal.timeout(20_000) })
+  if (!r.ok) throw new Error(`wordpress.org answered ${r.status} for the salts`)
+  const salts = new Map([...((await r.text()).matchAll(/define\(\s*'([A-Z_]+)'\s*,\s*'([^']*)'\s*\);/g))].map(m => [m[1], m[2]]))
+  const missing = WP_SALTS.filter(k => !salts.get(k))
+  if (missing.length) throw new Error(`wordpress.org sent no ${missing.join(', ')}`)
+
+  const put = (text, key, val) => {
+    const re = new RegExp(`define\\(\\s*'${key}'\\s*,\\s*'[^']*'\\s*\\);`)
+    if (!re.test(text)) throw new Error(`wp-config-sample.php has no ${key} line`)
+    return text.replace(re, () => `define( '${key}', '${val}' );`)
+  }
+  let conf = fs.readFileSync(path.join(dir, 'wp-config-sample.php'), 'utf8')
+  const values = [['DB_NAME', dbName], ['DB_USER', dbName], ['DB_PASSWORD', password], ['DB_HOST', 'localhost'], ...WP_SALTS.map(k => [k, salts.get(k)])]
+  for (const [k, v] of values) conf = put(conf, k, v)
+  // 0640 and not 0644: this file holds the database password, and the group is what php-fpm runs as
+  fs.writeFileSync(path.join(dir, 'wp-config.php'), conf, { mode: 0o640 })
+}
+
+/**
+ * The database, its user and the grant, in one `-e` call. The SQL is a single argv element and never
+ * a shell string, and both interpolated values are already constrained — the name passed
+ * `validName`, so no quote, backtick or semicolon can reach it, and the password is base64url. That
+ * constraint is the whole injection defense here; neither may be loosened without re-reading this.
+ *
+ * `CREATE ... IF NOT EXISTS` then `ALTER USER` is what makes a retry converge: a second attempt
+ * mints a new password, and without the ALTER the user would keep the first one while the
+ * wp-config.php just written got the second.
+ */
+async function createWordpressDb(bin, name, password) {
+  const sql = [
+    `CREATE DATABASE IF NOT EXISTS \`${name}\`;`,
+    `CREATE USER IF NOT EXISTS '${name}'@'localhost' IDENTIFIED BY '${password}';`,
+    `ALTER USER '${name}'@'localhost' IDENTIFIED BY '${password}';`,
+    `GRANT ALL PRIVILEGES ON \`${name}\`.* TO '${name}'@'localhost';`,
+    'FLUSH PRIVILEGES;',
+  ].join(' ')
+  const r = await shell(bin, ['-e', sql], { timeout: 30_000 })
+  if (r.status !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-500) || `${bin} refused the statement`)
+}
+
+/**
+ * Download WordPress into a site's docroot, with a database and a wp-config.php for it.
+ *
+ * Deliberately outside apply() and outside the manifest. safeApply rolls back by restoring
+ * byte-for-byte copies of the files it is handed, and a directory cannot enter `backups` — so the
+ * ordering below is what makes a failure safe instead: everything lands in a scratch dir first, and
+ * the docroot is only touched once the whole download, database and config have succeeded.
+ *
+ * The credentials live in wp-config.php and nowhere else. Not in the manifest, not in settings —
+ * so they cannot be read back out of the dashboard, and a history revert cannot resurrect them.
+ */
+app.post('/api/sites/:name/wordpress', async (req, res) => {
+  const site = findSite(req.params.name)
+  if (!site) return res.status(404).json({ error: 'not found' })
+
+  const occupied = docrootOccupied(site.root)
+  if (occupied) {
+    return res.status(409).json({ error: `${site.root} already holds ${occupied} — this would write over them. Move them aside, or delete the document root along with the site.` })
+  }
+
+  // Three things the conf has to say before WordPress can serve, checked together because they are
+  // fixed in one place, the site form. Off, the static fallback serves wp-config.php as plain text;
+  // no front controller and every permalink 404s; no index.php and the site root itself 403s. A site
+  // created from the WordPress starting point has all three, so this normally never fires.
+  const index = String(site.index || '').trim().split(/\s+/)
+  const notReady = [
+    !(site.php?.enabled && site.php?.endpoint) && 'PHP is off, so wp-config.php would be served as plain text',
+    !site.php?.frontController && 'the PHP front controller is off, so permalinks would 404',
+    !index.includes('index.php') && 'index.php is not in the index list, so the site root would 403',
+  ].filter(Boolean)
+  if (notReady.length) {
+    return res.status(409).json({ error: `this site is not set up to run WordPress — ${notReady.join('; ')}. Open it in Sites and turn those on; Settings → Stack shows the PHP endpoint to paste in.` })
+  }
+
+  if (DRY) return res.status(409).json({ error: 'dry run — nothing is downloaded' })
+
+  const stack = await stackStatus()
+  if (!stack.db.kind) return res.status(409).json({ error: 'no database server on this box — install the stack from Settings → Stack first' })
+
+  let scratch
+  let version = ''
+  try {
+    const dl = await fetchWordpress()
+    version = dl.version
+    scratch = fs.mkdtempSync(path.join(PATHS.stateDir, 'wordpress-'))
+    fs.writeFileSync(path.join(scratch, 'wordpress.zip'), dl.buf)
+    // unzip refuses absolute paths and .. by default, so zip-slip is contained to the scratch dir
+    const un = await shell('unzip', ['-q', '-o', path.join(scratch, 'wordpress.zip'), '-d', scratch], { timeout: 120_000 })
+    if (un.status !== 0) throw new Error(un.stderr.trim() || 'unzip failed')
+    // checked rather than assumed: unzip exits 0 on an archive whose top directory is named
+    // anything at all, and the copy below needs to know which one it got
+    const src = path.join(scratch, 'wordpress')
+    if (!fs.existsSync(path.join(src, 'index.php'))) throw new Error('the archive contains no wordpress/index.php')
+
+    const password = crypto.randomBytes(24).toString('base64url')
+    // detection decided which server is on the box; its client is the matching one
+    await createWordpressDb(stack.db.kind === 'mysql' ? 'mysql' : 'mariadb', site.name, password)
+    await writeWpConfig(src, { dbName: site.name, password })
+
+    fs.cpSync(src, site.root, { recursive: true, force: true })
+    // not carried reliably by cpSync, and this is the file with the password in it
+    fs.chmodSync(path.join(site.root, 'wp-config.php'), 0o640)
+    // the placeholder would otherwise win the site's root URL: nginx resolves `/` through `index`,
+    // which finds index.html long before it reaches the front controller
+    const idx = path.join(site.root, 'index.html')
+    if (fs.existsSync(idx) && WP_PLACEHOLDER.test(fs.readFileSync(idx, 'utf8'))) fs.rmSync(idx, { force: true })
+  } catch (e) {
+    return res.status(502).json({ error: String(e.message).slice(0, 600) })
+  } finally {
+    if (scratch) fs.rmSync(scratch, { recursive: true, force: true })
+  }
+  res.json({ ok: true, version, db: site.name })
 })
 
 app.delete('/api/sites/:name/files', (req, res) => {
@@ -986,7 +1313,25 @@ const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 // package.json before anything is spawned.
 const NPM_SHELL = process.platform === 'win32'
 
-app.get('/api/settings/updates', async (req, res) => {
+// What this process is actually running, read once at boot. A package whose version on disk has
+// moved since is an update that has been installed and not loaded — the only thing "restart needed"
+// can mean here, and invisible from the panel the moment its tab closes.
+const BOOT_VERSIONS = Object.fromEntries(RUNTIME_DEPS().map(n => [n, installedVersion(n)]))
+
+/**
+ * The registry check is the one thing here that leaves the machine, and the bell asks on every poll,
+ * so the answer is cached. A request per package per poll for a version number nobody is waiting on
+ * is how a dashboard gets itself rate-limited, and on a host with no outbound DNS it is eight
+ * seconds a package every thirty seconds for an item that would have been empty anyway. Six hours is
+ * far shorter than any release cadence that matters. `?force=1` is the Settings panel's own fetch,
+ * which skips the cache and refills it — so opening that tab is what keeps the bell's copy fresh.
+ */
+let UPDATE_CACHE = { at: 0, data: null }
+let UPDATE_PENDING = false
+const UPDATE_TTL = 6 * 60 * 60 * 1000
+
+async function checkUpdates(force) {
+  if (!force && UPDATE_CACHE.data && Date.now() - UPDATE_CACHE.at < UPDATE_TTL) return UPDATE_CACHE.data
   const runtime = RUNTIME_DEPS()
   const out = await Promise.all(DEP_NAMES().map(async name => {
     const installed = installedVersion(name)
@@ -1003,8 +1348,13 @@ app.get('/api/settings/updates', async (req, res) => {
   // `systemd` tells the panel whether a restart is even on offer: nothing else will start this
   // process again, so offering the button where it would only stop the dashboard is the one mistake
   // here that cannot be undone from the browser.
-  res.json({ packages: out, reachable: out.some(p => p.latest), systemd: !!process.env.INVOCATION_ID })
-})
+  const data = { packages: out, reachable: out.some(p => p.latest), systemd: !!process.env.INVOCATION_ID }
+  UPDATE_CACHE = { at: Date.now(), data }
+  return data
+}
+
+// The panel forces, so it is always looking at a fresh answer; the bell reads through the cache.
+app.get('/api/settings/updates', async (req, res) => res.json(await checkUpdates(req.query.force === '1')))
 
 /**
  * Install one package at the registry's newest version, then prove it still imports.
@@ -1061,6 +1411,158 @@ app.post('/api/settings/restart', (req, res) => {
   // and the browser reports a network error instead of what happened.
   res.json({ ok: true, output: 'restarting — sign in again in a moment' })
   setTimeout(() => process.exit(1), 300)
+})
+
+// ---------- module 8: the stack (nginx + database + php) ----------
+/**
+ * This dashboard does not install packages. `deploy/lemp.sh` does, and it is the same file
+ * `install.sh --lemp` runs — so the package list exists once, and what you get from the button is
+ * what you get over SSH.
+ *
+ * What is here is the way to *watch* it. A package install is the one action in this app nothing
+ * can roll back, so a failure nobody can see would be worse than no button at all: the output is
+ * streamed as it happens, and the outcome outlives the request in settings.json.
+ */
+const LEMP_SH = fileURLToPath(new URL('./deploy/lemp.sh', import.meta.url))
+
+// A systemd unit does not inherit a login shell's PATH, and `apt-get: not found` from a service is a
+// confusing way to learn that. DEBIAN_FRONTEND because a package prompt would otherwise block for
+// ever on a stream nobody can type into.
+const LEMP_ENV = {
+  ...process.env,
+  PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+  DEBIAN_FRONTEND: 'noninteractive',
+}
+
+const LEMP_LINES = 500 // an apt run is chatty and this buffer lives in memory
+let lempJob = null // one install at a time: { child, lines, status, done, error, subs }
+
+// The script's own summary line is the answer to "what did we actually get", so it is parsed rather
+// than re-derived here. A shell that finds nothing prints an empty value, not an error.
+function parseLempLine(out) {
+  const kv = {}
+  for (const pair of ((out || '').match(/^NXD-LEMP (.*)$/m)?.[1] || '').split(' ')) {
+    const i = pair.indexOf('=')
+    if (i > 0) kv[pair.slice(0, i)] = pair.slice(i + 1)
+  }
+  return kv
+}
+
+/**
+ * What is installed, asked of the box rather than remembered. Never throws: every probe is a
+ * `shell()` call, and a missing binary comes back as a non-zero status.
+ */
+async function stackStatus() {
+  const [detect, nginx, unzip] = await Promise.all([
+    shell('bash', [LEMP_SH, '--detect'], { env: LEMP_ENV, timeout: 15_000 }),
+    shell('nginx', ['-v'], { timeout: 5000 }), // -v writes the version to stderr, by design
+    shell('unzip', ['-v'], { timeout: 5000 }),
+  ])
+  const kv = parseLempLine(detect.stdout)
+  const [dbKind = '', dbVersion = ''] = (kv.db || '/').split('/')
+  const isActive = async unit => (unit ? (await shell('systemctl', ['is-active', unit], { timeout: 5000 })).stdout.trim() === 'active' : false)
+
+  const php = { version: kv.php || '', endpoint: kv.socket || '', service: kv.svc || '' }
+  const db = { kind: dbKind, version: dbVersion }
+  const nginxVersion = ((nginx.stderr || '').match(/nginx\/([0-9][0-9.]*)/) || [])[1] || ''
+  const out = {
+    dry: DRY,
+    nginx: { present: nginx.status === 0, version: nginxVersion },
+    php, db, unzip: unzip.status === 0,
+    installing: !!lempJob && !lempJob.done,
+  }
+  // Labels only — the packages behind them live in deploy/lemp.sh. Naming them here as well would
+  // be a second list to keep in step with the first.
+  out.missing = [
+    !out.nginx.present && 'nginx',
+    !php.endpoint && 'PHP-FPM',
+    !db.kind && 'a database server',
+    !out.unzip && 'unzip',
+  ].filter(Boolean)
+  ;[php.active, db.active] = [await isActive(php.service), await isActive(db.kind)]
+  out.last = readSettings().lastLempInstall || null
+  return out
+}
+
+app.get('/api/stack', async (req, res) => res.json(await stackStatus()))
+
+app.post('/api/stack/install', (req, res) => {
+  if (DRY) return res.status(409).json({ error: 'dry run — nothing is installed' })
+  if (lempJob && !lempJob.done) return res.status(409).json({ error: 'an install is already running' })
+
+  const child = spawn('bash', [LEMP_SH], { env: LEMP_ENV })
+  const job = { child, lines: [], buf: '', status: null, done: false, error: '', subs: new Set() }
+  lempJob = job
+  const push = chunk => {
+    job.buf += chunk.toString()
+    const parts = job.buf.split('\n')
+    job.buf = parts.pop() || ''
+    for (const l of parts) job.lines.push(l)
+    if (job.lines.length > LEMP_LINES) job.lines = job.lines.slice(-LEMP_LINES)
+    for (const notify of job.subs) notify()
+  }
+  child.stdout.on('data', push)
+  child.stderr.on('data', push) // apt and dpkg report failures on stderr; both belong on screen
+  child.on('error', e => { job.error = e.message; job.status = job.status ?? -1 })
+  child.on('close', code => {
+    job.status = code
+    job.done = true
+    for (const notify of job.subs) notify()
+    // The panel is not the only reader — a reload, or another browser, has to be able to find out how
+    // this went. settings.json is where this app already keeps small state: 0600, written atomically.
+    try {
+      writeSettings({ ...readSettings(), lastLempInstall: { ok: code === 0, status: code, at: new Date().toISOString(), tail: job.lines.slice(-40) } })
+    } catch (e) {
+      console.error(`could not record the stack install: ${e.message}`)
+    }
+  })
+  res.json({ ok: true, output: 'installing — the output appears below as it runs' })
+})
+
+app.get('/api/stack/install/stream', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    // Stops any nginx in front buffering this. A frozen install would look exactly like a hung one.
+    'X-Accel-Buffering': 'no',
+  })
+  res.write(': connected\n\n')
+
+  const job = lempJob
+  if (!job) {
+    res.write(`event: done\ndata: ${JSON.stringify({ ok: false, status: null, error: 'no install is running' })}\n\n`)
+    return res.end()
+  }
+
+  let sent = 0
+  let stopped = false
+  let ping = null
+  const stop = () => {
+    if (stopped) return
+    stopped = true
+    clearInterval(ping)
+    job.subs.delete(flush)
+  }
+  // A half-closed peer leaves this socket undestroyed; the heartbeat turns a dead peer into a write
+  // error. Both close events stop it. Same reasoning as the log tail above.
+  ping = setInterval(() => { try { res.write(': ping\n\n') } catch { stop() } }, 30_000)
+
+  function flush() {
+    if (stopped) return
+    // From `sent`, not from zero: a reattaching client gets the lines it has not seen, and a fresh
+    // one gets the whole run — which is what makes a reload mid-install not lose the output.
+    for (; sent < job.lines.length; sent++) res.write(`data: ${job.lines[sent]}\n\n`)
+    if (job.done) {
+      res.write(`event: done\ndata: ${JSON.stringify({ ok: job.status === 0, status: job.status, error: job.error })}\n\n`)
+      res.end()
+      stop()
+    }
+  }
+  job.subs.add(flush)
+  res.on('close', stop)
+  req.on('close', stop)
+  flush() // replay whatever has already happened, immediately
 })
 
 // static frontend shell is not secret (all server data flows through the guarded /api);

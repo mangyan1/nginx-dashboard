@@ -13,7 +13,7 @@ const WRITES = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 // What the operator just did, in one line, keyed by the shape of the route rather than written out
 // at each of the eighteen call sites — where the nineteenth would forget. A route that is not here
 // still reports its failures; it simply has nothing to boast about when it works.
-const said = (method, path, data) => {
+export const said = (method, path, data) => {
   const p = path.split('?')[0].split('/').filter(Boolean)   // ['api','sites','shop','enable']
   const site = data?.site?.name || p[2] || ''
   if (p[1] === 'sites') {
@@ -23,8 +23,14 @@ const said = (method, path, data) => {
     if (p[3] === 'repair') return `site ${site} rewritten from the manifest`
     if (p[3] === 'selfsigned') return 'self-signed certificate issued'
     if (p[3] === 'upload-zip') return 'folder deployed'
+    // Named release, not "installed": the version comes from the response that also gave the URL,
+    // so the toast is the one place the operator sees which WordPress they actually got.
+    if (p[3] === 'wordpress') return `WordPress ${data.version || 'downloaded'} is in the document root`
     if (p[3] === 'files') return method === 'DELETE' ? 'file deleted' : 'file uploaded'
-    return method === 'DELETE' ? `site ${site} deleted` : `site ${site} saved and applied`
+    // The `?root=1` clause is appended rather than given its own branch: the site *was* deleted
+    // either way, and the only news is what became of its files. This is also the one channel that
+    // survives `del()` unmounting the panel, so it is where that news has to be.
+    return method === 'DELETE' ? `site ${site} deleted${data?.output ? `, ${data.output}` : ''}` : `site ${site} saved and applied`
   }
   if (p[1] === 'settings') {
     if (p[2] === '2fa') return p[3] === 'enable' ? 'second factor on' : p[3] === 'disable' ? 'second factor off' : 'second-factor setup started'
@@ -37,7 +43,14 @@ const said = (method, path, data) => {
     if (p[2] === 'restart') return 'restarting the dashboard'
     return ''
   }
-  if (p[1] === 'nginx') return `nginx ${p[2]}`
+  // Past tense, because this says what happened rather than which button was pressed. "nginx reload"
+  // under a button labelled Reload is the click reporting itself back, which reads as it not having
+  // registered — and the operator presses it again. `test` has no verb of its own here: what a test
+  // answers with is nginx's own verdict, not "nginx tested".
+  if (p[1] === 'nginx') return {
+    start: 'nginx started', stop: 'nginx stopped', restart: 'nginx restarted',
+    reload: 'nginx reloaded', test: 'config is valid',
+  }[p[2]] || `nginx ${p[2]}`
   if (p[1] === 'logs') return p[2] === 'rotate' ? 'logs rotated' : 'old logs purged'
   if (p[1] === 'cert') return 'certificate requested'
   return ''

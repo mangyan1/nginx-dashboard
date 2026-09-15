@@ -1,6 +1,9 @@
 #!/bin/bash
 # nginx-dashboard installer — idempotent: safe to re-run.
 # Checks every dependency; installs missing ones, upgrades outdated ones, then installs the app.
+#
+#   install.sh          the dashboard and what it needs (nginx, certbot, unzip, node)
+#   install.sh --lemp   the above, plus MariaDB and PHP-FPM — see deploy/lemp.sh
 set -euo pipefail
 
 APP_DIR=/opt/nginx-dashboard
@@ -8,6 +11,17 @@ SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_MIN=22
 
 say() { echo -e "\033[1;34m[install]\033[0m $*"; }
+
+# The stack is opt-in. Without the flag this script behaves exactly as it always has, and re-running
+# it never touches the package set on a box whose operator chose their own database.
+WITH_LEMP=0
+for arg in "$@"; do
+  case "$arg" in
+    --lemp) WITH_LEMP=1 ;;
+    -h|--help) echo "usage: install.sh [--lemp]   --lemp also installs MariaDB + PHP-FPM"; exit 0 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
 
 # ---------- helpers ----------
 ver() { echo "$@" | awk -F '[^0-9]+' '{ printf "%d%03d%03d\n", $1, $2, $3 }'; }
@@ -62,6 +76,15 @@ ensure_apt_pkg certbot certbot
 ensure_apt_pkg unzip unzip
 command -v openssl >/dev/null || apt_install openssl
 
+# ---------- 1b. the stack (opt-in) ----------
+# Shares one implementation with the dashboard's Settings → Stack button, which runs this same
+# script — so a package added here is a package the button installs too.
+if [ "$WITH_LEMP" = 1 ]; then
+  bash "$SRC_DIR/deploy/lemp.sh"
+else
+  say "skipping MariaDB and PHP-FPM — re-run with --lemp to install the stack"
+fi
+
 # ---------- 2. app files + node deps ----------
 say "installing app to $APP_DIR…"
 mkdir -p "$APP_DIR"
@@ -83,16 +106,25 @@ if ! grep -q '^Environment=DASH_PASSWORD' /etc/systemd/system/nginx-dashboard.se
     "$SRC_DIR/deploy/nginx-dashboard.service" > /etc/systemd/system/nginx-dashboard.service
   say "generated dashboard password: $GENERATED_PASSWORD (change it in the unit file)"
 else
-  # carry the second factor across the refresh: the shipped unit carries the whole environment,
-  # so a plain copy would drop a hand-added DASH_TOTP_SECRET and downgrade login to password-only
-  # without saying so
+  # carry both secrets across the refresh: the shipped unit carries the whole environment, so a
+  # plain copy drops a hand-added DASH_TOTP_SECRET (downgrading login to password-only without
+  # saying so) and resets DASH_PASSWORD to the placeholder the template ships with — which is a
+  # published password on a dashboard that is root-equivalent. Read both before the copy.
   KEEP_TOTP=$(grep -h '^Environment=DASH_TOTP_SECRET=' /etc/systemd/system/nginx-dashboard.service || true)
+  KEEP_PASSWORD=$(grep -h '^Environment=DASH_PASSWORD=' /etc/systemd/system/nginx-dashboard.service || true)
   cp "$SRC_DIR/deploy/nginx-dashboard.service" /etc/systemd/system/nginx-dashboard.service
+  if [ -n "$KEEP_PASSWORD" ]; then
+    sed -i "s|^Environment=DASH_PASSWORD=.*|$KEEP_PASSWORD|" /etc/systemd/system/nginx-dashboard.service
+    say "kept existing DASH_PASSWORD"
+  else
+    GENERATED_PASSWORD=$(openssl rand -hex 12)
+    sed -i "s|^Environment=DASH_PASSWORD=.*|Environment=DASH_PASSWORD=$GENERATED_PASSWORD|" /etc/systemd/system/nginx-dashboard.service
+    say "generated dashboard password: $GENERATED_PASSWORD (change it in the unit file)"
+  fi
   if [ -n "$KEEP_TOTP" ]; then
     sed -i "s|^#Environment=DASH_TOTP_SECRET=.*|$KEEP_TOTP|" /etc/systemd/system/nginx-dashboard.service
     say "kept existing DASH_TOTP_SECRET"
   fi
-  say "kept existing DASH_PASSWORD"
 fi
 systemctl daemon-reload
 systemctl enable --now nginx-dashboard

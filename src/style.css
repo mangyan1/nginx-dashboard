@@ -1,7 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   NXD — brand green on a dark instrument panel. Hairlines, 3px corners, zero
-   drop shadows, monospace for anything that is data. Both themes are the same
-   component set; only the token block switches.
+   NXD — brand green on a dark instrument panel. Hairlines, 3px corners, no
+   drop shadows on anything that sits in the page — the only two are the dialog
+   and the toast, which have to lift off it. Monospace for anything that is
+   data. Both themes are the same component set; only the token block switches.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
@@ -21,7 +22,7 @@
   --accent-lo: #0B4A24; --accent-wash: rgba(0, 150, 57, .12); --on-accent: #FFFFFF;
 
   --ok: #3FBF6E; --ok-bg: #0E1A12; --ok-line: #23482F;
-  --warn: #D2A72E; --warn-ink: #D2A72E; --warn-lo: #6E5A17;
+  --warn: #D2A72E; --warn-ink: #D2A72E; --warn-lo: #6E5A17; --warn-wash: rgba(210, 167, 46, .08);
   --err: #D2544E; --err-hi: #E2A9A6; --err-lo: #3A2222; --err-bg: #150F0F;
 
   --sunken: #060807; --input-bg: #0B0D0C; --track: #1B1F1E; --track-dim: #4A504E;
@@ -41,7 +42,7 @@
   --accent-lo: #A8D9BC; --accent-wash: rgba(0, 150, 57, .1); --on-accent: #FFFFFF;
 
   --ok: #2E7D3E; --ok-bg: #EFF6F0; --ok-line: #BEDCC4;
-  --warn: #B08A12; --warn-ink: #8A6D10; --warn-lo: #D8BE79;
+  --warn: #B08A12; --warn-ink: #8A6D10; --warn-lo: #D8BE79; --warn-wash: rgba(176, 138, 18, .07);
   --err: #C0392B; --err-hi: #8E2F22; --err-lo: #EBC9C3; --err-bg: #FDF3F2;
 
   --sunken: #FCFBF9; --input-bg: #FFFFFF; --track: #E3E0DA; --track-dim: #C6C3BC;
@@ -120,6 +121,91 @@ a { color: var(--accent-ink); }
 }
 .ghost:hover { color: var(--text); border-color: var(--line); background: var(--surface-2); }
 
+/* ── the bell ──────────────────────────────────────────────────────────────── */
+/* Outline badge, not a filled one: it inherits the kind's ink and rides on the page background, so
+   it needs no white-on-red contrast argument in either theme, and it matches the hairlines the rest
+   of the strip is built from. The count is decorative anyway — the button's own label says it. */
+.bell { position: relative; display: inline-flex; align-items: center; }
+/* Never dimmer than the buttons beside it. It was a step below SIGN OUT when empty, on the theory
+   that a receding control reads as "nothing here" — but the badge already says that, and the cost
+   was a bell you had to already know about to find. The floor is the strip's own weight; having
+   something to report steps it up to full text. */
+.bell.quiet { color: var(--dim); }
+.bell:not(.quiet) { color: var(--text); }
+/* Rings whenever it has anything at all to report — the badge alone was too quiet to notice, which
+   is the whole reason a bell moves. The cycle rests for its second half, so it draws the eye without
+   throbbing at it, and the transform is a compositor-only 15px rotate. Pivots near the top because
+   that is where a bell is mounted. `prefers-reduced-motion` below drops the swing and leaves the
+   badge and the colour, which is where the signal actually is. */
+@keyframes ring {
+  0%, 50%, 100% { transform: rotate(0) }
+  8% { transform: rotate(10deg) } 18% { transform: rotate(-9deg) }
+  28% { transform: rotate(6deg) } 38% { transform: rotate(-4deg) }
+  46% { transform: rotate(1.5deg) }
+}
+.bell:not(.quiet) svg { animation: ring 4s ease-in-out infinite; transform-origin: 50% 22%; }
+.bell-n {
+  position: absolute; top: -3px; right: -3px; min-width: 15px; height: 15px; padding: 0 3px;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 99px;
+  font: 600 9px/1 var(--mono); font-style: normal;
+  background: var(--bg); border: 1px solid currentColor;
+}
+.bell-n.warn { color: var(--warn-ink); }
+.bell-n.err { color: var(--err); }
+.bell-n.info { color: var(--accent-ink); }
+
+dialog.notes {
+  width: min(540px, calc(100vw - 32px)); max-height: min(72vh, 580px);
+  margin: 11vh auto auto; padding: 0; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--surface); color: var(--text); overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .45);
+  font: 400 11.5px/1.55 var(--mono);
+}
+/* [open] is load-bearing: `display: flex` on the bare `dialog.notes` would beat the UA's
+   `dialog:not([open]) { display: none }` and park the whole panel on the page permanently. */
+dialog.notes[open] { display: flex; flex-direction: column; }
+dialog.notes::backdrop { background: rgba(0, 0, 0, .5); }
+.notes header {
+  display: flex; align-items: center; gap: 9px; padding: 10px 12px;
+  border-bottom: 1px solid var(--line); background: var(--strip-a);
+}
+.notes header b { font: 600 10px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+.notes header .notes-n { color: var(--dimmer); font-size: 10px; }
+.notes header .ghost { margin-left: auto; }
+.notes ul { list-style: none; margin: 0; padding: 7px; overflow: auto; }
+.notes li {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  margin-bottom: 5px; padding: 9px 11px; border-left: 2px solid var(--line);
+  border-radius: var(--r); background: var(--surface-2);
+}
+.notes li:last-child { margin-bottom: 0; }
+.notes li b { font-weight: 600; }
+.notes li span { color: var(--dim); }
+/* the left rule is the severity; the title only tints, so a wall of red is still readable */
+.notes li.err { border-left-color: var(--err); }
+.notes li.err b { color: var(--err-hi); }
+.notes li.warn { border-left-color: var(--warn); }
+.notes li.warn b { color: var(--warn-ink); }
+.notes li.info { border-left-color: var(--accent); }
+.notes li.info b { color: var(--accent-ink); }
+.notes li .ghost { margin-top: 4px; padding: 4px 7px; border-color: var(--line); }
+.notes-none { margin: 0; padding: 24px 20px; text-align: center; color: var(--dim); }
+
+/* ── the confirm dialog ────────────────────────────────────────────────────── */
+/* Same dialog as the bell's, narrowed to one question. These rules come after the `.notes` ones on
+   purpose: `dialog.notes[open]` and `dialog.confirm[open]` have identical specificity, so source
+   order is what decides the display — and this one is prose, not a scrolling list. */
+dialog.confirm { width: min(430px, calc(100vw - 32px)); max-height: none; margin: 17vh auto auto; }
+dialog.confirm[open] { display: block; }
+/* the strip moves to the button row, so the title needs no rule of its own */
+.confirm header { border-bottom: 0; background: none; padding-bottom: 4px; }
+.confirm .confirm-body { margin: 0; padding: 0 12px 14px; color: var(--dim); }
+.confirm form {
+  display: flex; justify-content: flex-end; gap: 7px; padding: 11px 12px;
+  border-top: 1px solid var(--line); background: var(--strip-a);
+}
+
+
 /* the live pip: a ring that pulses outward, still for dead and idle states */
 .live { display: inline-flex; align-items: center; gap: 7px; }
 .dot { width: 6px; height: 6px; border-radius: 99px; background: var(--ok); position: relative; flex: 0 0 6px; }
@@ -184,7 +270,7 @@ a { color: var(--accent-ink); }
 }
 .chip.ok { color: var(--ok); border-color: var(--ok-line); background: var(--ok-bg); }
 .chip.off { color: var(--dimmer); }
-.chip.warn { color: var(--warn-ink); border-color: var(--warn-lo); background: rgba(210, 167, 46, .09); }
+.chip.warn { color: var(--warn-ink); border-color: var(--warn-lo); background: var(--warn-wash); }
 .chip.un { color: var(--dim); border-color: var(--line); border-style: dashed; }
 .chip.err { color: var(--err); border-color: var(--err-lo); background: var(--err-bg); }
 /* "use default" — the one chip that is a button. It sits on the caption line, in the empty space
@@ -286,6 +372,7 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-radius
   color: var(--accent-ink); padding: 0 0 12px; display: block;
 }
 .section > .row:last-child, .section > .checks:last-child { margin-bottom: 0; }
+
 .upstream { border-left: 2px solid var(--line); padding-left: 12px; margin: 10px 0; }
 
 .out {
@@ -299,7 +386,7 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-radius
 /* ── the dashboard's own vhost ─────────────────────────────────────────────── */
 /* Not a chip and not a toast: it is on screen the whole time this site is open, because the
    mistake it warns about is made by typing in the fields below it. */
-.selfnote { border-bottom: 1px solid var(--line-soft); border-left: 2px solid var(--warn); background: rgba(210, 167, 46, .06); padding: 14px 16px; }
+.selfnote { border-bottom: 1px solid var(--line-soft); border-left: 2px solid var(--warn); background: var(--warn-wash); padding: 14px 16px; }
 .selfnote h4 { font: 600 12px/1.35 var(--sans); color: var(--warn-ink); margin: 0 0 6px; }
 .selfnote p { font: 400 11.5px/1.65 var(--sans); color: var(--dim); margin: 0 0 9px; }
 .selfnote p:last-child { margin-bottom: 0; }
@@ -307,7 +394,7 @@ input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border-radius
 .chip.self { color: var(--accent-ink); border-color: var(--accent-lo); background: var(--accent-wash); font-weight: 600; }
 
 /* a save that succeeded and still has something to say */
-.warns { border: 1px solid var(--warn-lo); background: rgba(210, 167, 46, .07); border-radius: var(--r); padding: 12px 14px; margin: 10px 0; }
+.warns { border: 1px solid var(--warn-lo); background: var(--warn-wash); border-radius: var(--r); padding: 12px 14px; margin: 10px 0; }
 .warns b { display: block; font: 500 9.5px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--warn-ink); margin-bottom: 9px; }
 .warns ul { margin: 0; padding-left: 16px; }
 .warns li { font: 400 11.5px/1.7 var(--sans); color: var(--dim); }
@@ -427,12 +514,14 @@ th:last-child, td:last-child { padding-right: 0; }
 .login h1 small { font: 400 10px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dimmer); display: block; padding-top: 7px; }
 
 /* ── snackbars ─────────────────────────────────────────────────────────────── */
-/* Top right, below the strip. The bottom of the pane is where .savebar pins Save and Delete, and a
-   snackbar covering the button it is reporting on is worse than no snackbar at all. */
+/* Top centre, below the strip. It was top right, where it landed diagonally opposite the savebar at
+   the foot of the pane — so the confirmation for a Save & apply clicked bottom-left appeared 700px
+   away, small, for five seconds. Centre is where the eye already is. Still not over the savebar
+   itself: a snackbar covering the button it is reporting on is worse than no snackbar at all. */
 .toasts {
-  position: fixed; top: 58px; right: 18px; z-index: 10;
+  position: fixed; top: 58px; left: 50%; transform: translateX(-50%); z-index: 10;
   display: flex; flex-direction: column; gap: 8px;
-  max-width: min(380px, calc(100vw - 36px));
+  max-width: min(440px, calc(100vw - 36px));
 }
 .toast {
   display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: var(--r);
@@ -447,7 +536,7 @@ th:last-child, td:last-child { padding-right: 0; }
   color: inherit; opacity: .55; font: 400 11px/1 var(--mono);
 }
 .toast .toast-x:hover { opacity: 1; }
-@keyframes toast-in { from { opacity: 0; transform: translateX(14px) } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-12px) } }
 /* .toast's animation is covered by the reduced-motion block below, which switches off all of them */
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important } }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { ask } from '../confirm.jsx'
 import { Btn, Field, Out, useAsync } from './ui.jsx'
 
 const ACTIONS = ['start', 'stop', 'restart', 'reload', 'test']
@@ -7,8 +8,8 @@ const ACTIONS = ['start', 'stop', 'restart', 'reload', 'test']
 // stop and restart both drop in-flight connections; reload is the one you almost always want,
 // so it is the only primary and the other two say what they will actually cost.
 const CONFIRM = {
-  stop: 'Stop nginx? Every site goes offline and in-flight connections are dropped.',
-  restart: 'Restart nginx? In-flight connections are dropped — reload applies config without that.',
+  stop: { title: 'Stop nginx?', body: 'Every site goes offline and in-flight connections are dropped.', go: 'Stop nginx', danger: true },
+  restart: { title: 'Restart nginx?', body: 'In-flight connections are dropped. Reload applies config without that.', go: 'Restart nginx', danger: true },
 }
 
 // The RFC1918 + loopback set, which is what "on the LAN" means for an allowlist. Written out
@@ -211,7 +212,7 @@ export default function Control({ status, onStatus, onOpenSite }) {
     onStatus()
   })
 
-  const click = a => { if (!CONFIRM[a] || confirm(CONFIRM[a])) run(a) }
+  const click = async a => { if (!CONFIRM[a] || await ask(CONFIRM[a])) run(a) }
 
   const dry = status?.dry
   const state = dry ? 'dry run' : (status?.active || 'unknown')

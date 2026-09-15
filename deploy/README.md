@@ -17,6 +17,35 @@ ssh user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh'
 `install.sh` is idempotent — re-running it upgrades outdated dependencies
 (node, nginx, certbot, npm packages) and refreshes the app files.
 
+## The stack (optional)
+
+The dashboard serves static sites out of the box. To run PHP sites — WordPress
+included — install the rest of the stack:
+
+```bash
+ssh user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh --lemp'
+```
+
+That is the same installer plus `deploy/lemp.sh`, which installs MariaDB (or
+leaves the MySQL you already have alone) and PHP-FPM, starts them, and prints
+the FastCGI endpoint it found. It is idempotent and opt-in: without `--lemp` a
+re-run never touches the package set.
+
+The same script is what the dashboard's **Settings → Stack** panel runs when you
+press *Install LEMP*, so the two cannot drift apart. That panel also shows what
+is installed and streams the output while an install runs — which is the point
+of it, since a package install is the one thing here nothing can roll back.
+
+`deploy/lemp.sh --detect` prints just the summary line, changes nothing and
+needs no root. That is what the dashboard reads to prefill a site's PHP endpoint:
+
+```
+NXD-LEMP socket=unix:/run/php/php8.3-fpm.sock php=8.3 db=mariadb/10.11 svc=php8.3-fpm
+```
+
+The socket is parsed out of PHP's own pool config rather than guessed — the
+version in those paths changes with every Ubuntu release.
+
 ## First run
 
 The installer generates a random `DASH_PASSWORD` and prints it once.
@@ -26,11 +55,13 @@ then `systemctl restart nginx-dashboard`.
 ## Environment
 
 Everything is set in the systemd unit. The installer carries an existing
-`DASH_TOTP_SECRET` across a re-run; the rest come from the shipped unit file.
+`DASH_PASSWORD` and `DASH_TOTP_SECRET` across a re-run; the rest come from the
+shipped unit file.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `DASH_PASSWORD` | — | the login password; required |
+| `DASH_PASSWORD` | — | the login password; required, and refused if it is the unit's own `change-me` or another published placeholder |
+| `DASH_DEMO` | unset | `1` allows a placeholder password and nothing else. `npm run demo` sets it; never set it here |
 | `DASH_HOST` / `DASH_PORT` | `127.0.0.1` / `7412` | what the dashboard itself binds |
 | `DASH_SELF_NAME` | `nxd` | name of the dashboard's own managed vhost; unset pins nothing |
 | `DASH_MAX_UPLOAD_MB` | `2048` | upload cap for the file manager, and the default for the self vhost's `client_max_body_size` |

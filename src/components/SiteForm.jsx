@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import { Btn, Chip, Field, Toggle, Section, Out } from './ui.jsx'
 import FileManager from './FileManager.jsx'
 import { at } from '../defaults.js'
+import { ask } from '../confirm.jsx'
 
 // The menu of what nginx knows how to compress and cache — deliberately wider than the default
 // list, because a site may legitimately want a type the default leaves out (a PDF is not worth
@@ -90,6 +91,15 @@ function SiteEditor({ site, D, onSaved, onDeleted, onDirty }) {
   const [result, setResult] = useState(null)
   const [warns, setWarns] = useState([])
   const [busy, setBusy] = useState(false)
+  // What a new site starts as: 'blank' (the placeholder page) or 'wordpress'. Component state, and
+  // deliberately not a key of `s` — `seed()` copies key by key, so it would be dropped on the
+  // post-save re-seed, and `sanitizeSite` spreads unknown keys straight into the manifest, so it
+  // would become permanent state instead of a choice made once on this form.
+  const [starter, setStarter] = useState('blank')
+  // WordPress chosen and no PHP-FPM found. Its own state rather than read off the stack answer,
+  // because a failed request has to explain itself too — the alternative is a select that appears
+  // to do nothing at all.
+  const [wpNoPhp, setWpNoPhp] = useState(false)
   // the state this form was opened (or last saved) with, so "dirty" means "differs from that"
   const [baseline, setBaseline] = useState(() => JSON.stringify(s))
   const dirty = JSON.stringify(s) !== baseline
@@ -112,6 +122,31 @@ function SiteEditor({ site, D, onSaved, onDeleted, onDirty }) {
 
   const toPayload = () => ({ ...s, domains: domainList(s.domains) })
 
+  /**
+   * Choosing WordPress fills in the three fields the route refuses without, rather than leaving
+   * them to be got right by hand — one of which, the endpoint, is a path that changes with every
+   * PHP release. The socket comes from the server, which parses PHP's own pool config, so what is
+   * filled in is what PHP is actually listening on.
+   *
+   * With no socket detected, PHP is left untouched on purpose: `enabled: true` with a blank
+   * endpoint is a 400 by construction, so prefilling half of it would make the happy path refuse
+   * to save. The hint under the select says so instead.
+   */
+  const chooseStarter = async v => {
+    setStarter(v)
+    if (v !== 'wordpress') return
+    // Asked for every time it is chosen, never cached: installing the stack and picking WordPress
+    // again is the recovery this offers, and a cached answer would make that do nothing.
+    const st = await api('GET', '/api/stack').catch(() => null)
+    setWpNoPhp(!st?.php?.endpoint)
+    if (!st?.php?.endpoint) return
+    setS(prev => ({
+      ...prev,
+      index: 'index.php index.html index.htm',
+      php: { ...prev.php, enabled: true, endpoint: st.php.endpoint, frontController: true },
+    }))
+  }
+
   const save = async () => {
     setBusy(true)
     try {
@@ -130,6 +165,16 @@ function SiteEditor({ site, D, onSaved, onDeleted, onDirty }) {
       const next = seed(r.site || s)
       setS(next)
       setBaseline(JSON.stringify(next))
+      // The download gets its own try, and onSaved() waits outside it. Thrown into the catch below
+      // it would report the *save* as rejected — and the operator would be left on a New-site form
+      // for a site that now exists, where the next Save is a 409.
+      if (isNew && starter === 'wordpress') {
+        const done = await api('POST', `/api/sites/${p.name}/wordpress`).catch(e => ({ error: e.message }))
+        setWarns([])
+        setResult(done.error
+          ? { ok: false, output: `the site was created, but WordPress was not — ${done.error}` }
+          : { ok: true, output: `saved & applied — WordPress ${done.version} downloaded` })
+      }
       onSaved(p.name)
     } catch (e) {
       setWarns([])
@@ -157,10 +202,28 @@ function SiteEditor({ site, D, onSaved, onDeleted, onDirty }) {
     catch (e) { setResult({ ok: false, output: e.message }) } finally { setBusy(false) }
   }
 
-  const del = async () => {
-    if (!confirm(`Delete site ${s.name}? Its conf file and symlink are removed; docroot stays.`)) return
+  /**
+   * The same route the new-site form calls, for a download that failed after the site was made.
+   * Gated on the route's own three conditions below, so pressing it is never a 409 by surprise.
+   */
+  const downloadWp = async () => {
     setBusy(true)
-    try { await api('DELETE', `/api/sites/${s.name}`); onDeleted() }
+    try {
+      const w = await api('POST', `/api/sites/${s.name}/wordpress`)
+      setResult({ ok: true, output: `WordPress ${w.version} downloaded` })
+      onSaved()
+    } catch (e) { setResult({ ok: false, output: e.message }) } finally { setBusy(false) }
+  }
+
+  const del = async () => {
+    // The checkbox answer is written onto `root` rather than returned, so `ask` still resolves the
+    // bare boolean every other call site reads. It is only consulted when the answer was yes, which
+    // is why a no leaves it untouched at its default.
+    const root = { label: `also delete ${site.root} and everything in it`, checked: false }
+    const body = `Its conf file and sites-enabled symlink are removed. Its document root, ${site.root}, is left alone unless you say otherwise below.`
+    if (!(await ask({ title: `Delete ${s.name}?`, body, go: 'Delete site', danger: true, option: root }))) return
+    setBusy(true)
+    try { await api('DELETE', `/api/sites/${s.name}${root.checked ? '?root=1' : ''}`); onDeleted() }
     catch (e) { setResult({ ok: false, output: e.message }) } finally { setBusy(false) }
   }
 
@@ -209,6 +272,27 @@ function SiteEditor({ site, D, onSaved, onDeleted, onDirty }) {
         <Field label="Document root" def={rootDef} value={s.root} onDef={v => set({ root: v })}>
           <input value={s.root} onChange={e => set({ root: e.target.value })} placeholder={rootDef} />
         </Field>
+        {isNew && <>
+          <Field label="Starting point">
+            <select value={starter} onChange={e => chooseStarter(e.target.value)}>
+              <option value="blank">blank — a placeholder page</option>
+              <option value="wordpress">WordPress — download the latest release</option>
+            </select>
+          </Field>
+          <p className="hint">
+            WordPress needs a database and PHP, and it is installed after the site is saved — so a
+            failure leaves a working site with no WordPress in it rather than nothing at all. If no
+            PHP-FPM was found, the fields below are left alone and
+            <b> Settings → Stack</b> can install it.
+          </p>
+          {starter === 'wordpress' && wpNoPhp && !s.php.endpoint && (
+            <p className="hint warn">
+              No PHP-FPM answered on this server, so nothing was filled in — an endpoint has to come
+              from somewhere. <b>Settings → Stack</b> installs PHP and MariaDB; pick WordPress again
+              afterwards to fill these in.
+            </p>
+          )}
+        </>}
         <Field label="Index files (in order)" {...chip('index', s.index, v => set({ index: v }))}>
           <input value={s.index} onChange={e => set({ index: e.target.value })} placeholder="index.php index.html" />
         </Field>
@@ -307,6 +391,18 @@ function SiteEditor({ site, D, onSaved, onDeleted, onDirty }) {
           <Toggle checked={s.php.frontController} onChange={v => set({ frontController: v }, 'php')} label="Front controller — unmatched paths go to /index.php"
             {...tog('php.frontController', v => set({ frontController: v }, 'php'))} />
           <p className="hint">The script file is checked for existence before FastCGI sees it, so a .php path that does not exist is a 404 rather than code handed to the interpreter.</p>
+          {/* Gated on the *saved* site and not on the form above it, because the route reads the
+              manifest — so this appears exactly when pressing it will be accepted, rather than
+              offering a 409 for changes that have not been saved yet. Recovery for a download that
+              failed, and for a site someone configured for PHP by hand and now wants WordPress on. */}
+          {!isNew && site.php.enabled && !!site.php.endpoint && site.php.frontController && site.index.trim().split(/\s+/).includes('index.php') && (
+            <div className="actions">
+              <Btn disabled={busy} onClick={downloadWp}
+                title="download the latest WordPress release into the document root, with its database and wp-config.php">
+                Download WordPress
+              </Btn>
+            </div>
+          )}
         </>}
       </Section>
 

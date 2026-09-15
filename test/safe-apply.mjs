@@ -21,6 +21,7 @@ const { safeApply, hooks, MANIFEST, HTTP_CONF, PATHS, listHistory, revertHistory
 const {
   SELF_NAME, isSelf, defaultSite, renderSiteConf, validateSite, siteConfPath, driftOf, httpConfDrift,
   renderHttpConf, readManifest, parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors,
+  docrootRemovalRefusal,
   writeHtpasswd, htpasswdPath, hashUserRows,
 } = await import('../lib/manifest.js')
 const { b32encode, b32decode, totp, totpValid, newSecret, otpauth } = await import('../lib/totp.js')
@@ -607,6 +608,71 @@ check('reverting to a disabled symlink is refused',
   selfRevertErrors({ at: 1, label: 'x', files: [{ path: path.join(PATHS.sitesEn, 'nxd.conf'), content: null, link: null }] }, at).some(e => e.includes('disabled')))
 check('a snapshot that never mentions the symlink is allowed',
   selfRevertErrors({ at: 1, label: 'x', files: [{ path: HTTP_CONF, content: '# x', link: null }] }, at).length === 0)
+
+// ---------- the recursive-delete guard ----------
+// The only place this is exercised: DRY routes the delete to safeApplyDry in smoke.mjs, and the
+// demo's document roots are real absolute paths, so a guard that let one through would `rm -rf`
+// outside the probe dir on a developer's own machine.
+//
+// Absolute fake paths throughout, which is deliberate twice over: they do not exist, so
+// `realpathSync` throws and the symlink rule stays out of the way while the *other* rules are
+// tested — and a guard that wrongly allowed one would still only be pointed at a nonexistent path.
+const refuse = (root, sites = [], self = '') => docrootRemovalRefusal(root, sites, self)
+const site = (name, root) => ({ name, root })
+// Absolute, and rooted the way *this* platform roots things, so the paths below stay absent and the
+// symlink rule stays out of the way. A literal '/var/www' is absolute on Linux but resolves to
+// 'D:\\var\\www' on Windows, where realpathSync answering anything at all makes the two differ and
+// the symlink rule fires first — hiding whichever rule was actually under test.
+const abs = (...p) => path.join(path.parse(D).root, ...p)
+
+check('the filesystem root is refused', refuse(path.parse(D).root) !== null, String(refuse(path.parse(D).root)))
+// Refused on both platforms, though for different reasons: one segment on Linux, and on Windows
+// realpathSync answering 'D:\\etc' where the literal says '/etc'. The segment rule itself is pinned
+// by the two checks below instead, which say the same thing without the drive prefix ambiguity.
+check('...and so is one step below it', refuse('/etc') !== null && refuse('/usr') !== null, String(refuse('/etc')))
+// The boundary is "at least two segments below the root", and a drive prefix is one of them on
+// Windows — so the root itself and a genuine two-deep path are the portable way to state it.
+check('...while two segments down is allowed', refuse(abs('var', 'www')) === null, String(refuse(abs('var', 'www'))))
+check('a blank document root is refused', refuse('') !== null && refuse('   ') !== null)
+// ROOT_RE accepts this today and POST /api/sites will mkdirSync it — resolving it against wherever
+// the dashboard was started from is not something to guess at.
+check('a relative document root is refused', refuse('relative/site') !== null, String(refuse('relative/site')))
+check('...and its refusal names the path', refuse('relative/site').includes('relative/site'))
+
+const siblings = [site('a', abs('var', 'www')), site('b', abs('var', 'www', 'b'))]
+check('a root that contains another site is refused',
+  refuse(abs('var', 'www'), siblings, 'a') !== null, String(refuse(abs('var', 'www'), siblings, 'a')))
+check('...and a root that sits inside another site is refused the other way round',
+  refuse(abs('var', 'www', 'a', 'b'), [site('a', abs('var', 'www', 'a')), site('self', abs('var', 'www', 'a', 'b'))], 'self') !== null)
+check('...naming the site it would take with it', refuse(abs('var', 'www'), siblings, 'a').includes('"b"'))
+
+// The direction that is easy to miss, and the reason this iterates PATHS rather than listing it:
+// the docroot is not inside the state dir here, a state dir is inside the docroot.
+const stateDocroot = path.join(PATHS.stateDir, 'www')
+check('a document root inside the dashboard state dir is refused', refuse(stateDocroot) !== null, String(refuse(stateDocroot)))
+check('...and its parent is refused too', refuse(path.join(path.dirname(PATHS.stateDir), 'x')) !== null, String(refuse(path.join(path.dirname(PATHS.stateDir), 'x'))))
+check('...as is anything that would take the app itself', refuse(path.dirname(path.dirname(path.dirname(D)))) !== null)
+
+// The check that fails if the rule is ever written too broadly — a lone site's own root is not
+// "another site's root", and if this regresses every delete-with-files becomes impossible.
+check('a lone site\'s own document root is allowed', refuse(abs('var', 'www', 'a'), [site('self', abs('var', 'www', 'a'))], 'self') === null)
+check('...and an ordinary path on a real box is allowed', refuse(abs('srv', 'www', 'shop')) === null)
+// Absent, not unsafe: realpathSync throws, which must skip the symlink rule rather than returning
+// early — the early-return version let this exact path past every other rule.
+check('...including one that is not on disk yet', refuse(abs('srv', 'www', 'not-yet')) === null)
+
+// Tolerant of a box without symlink privileges (Windows without Developer Mode), where this is
+// simply not testable rather than failing.
+const realRoot = path.join(D, 'real-docroot')
+const linkRoot = path.join(D, 'link-docroot')
+fs.mkdirSync(realRoot, { recursive: true })
+try {
+  fs.symlinkSync(realRoot, linkRoot, 'dir')
+  check('a symlinked document root is refused', refuse(linkRoot) !== null, String(refuse(linkRoot)))
+  check('...and the refusal says where it points', refuse(linkRoot).includes(realRoot), String(refuse(linkRoot)))
+} catch {
+  console.log('  --  skipped: this box will not create a symlink without elevation')
+}
 
 // An install that never sets the variable must be untouched by all of the above — including not
 // finding some existing site of its own suddenly undeletable.

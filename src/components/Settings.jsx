@@ -3,6 +3,7 @@ import qrcode from 'qrcode-generator'
 import { api } from '../api.js'
 import * as toast from '../toast.js'
 import { Btn, Field, Section, Out } from './ui.jsx'
+import Stack from './Stack.jsx'
 
 /**
  * The QR, drawn from the encoder's own module grid rather than from the SVG string it can also hand
@@ -67,7 +68,7 @@ export default function Settings({ status, theme, onTheme }) {
     // sends nothing about this install, and "is anything behind" is the reason to open this section
     // at all — a button in front of it only means the answer is missing until it is pressed. A GET
     // reports nothing on failure, so a server with no outbound internet sees an empty table.
-    api('GET', '/api/settings/updates').then(setUpdates).catch(() => {})
+    api('GET', '/api/settings/updates?force=1').then(setUpdates).catch(() => {})
   }
   useEffect(load, [])
 
@@ -118,7 +119,7 @@ export default function Settings({ status, theme, onTheme }) {
   })
   // Only the updates. `load` also re-reads the settings and re-seeds the defaults draft, which would
   // throw away an edit in progress to answer a question about version numbers.
-  const checkUpdates = () => api('GET', '/api/settings/updates').then(setUpdates).catch(() => {})
+  const checkUpdates = () => api('GET', '/api/settings/updates?force=1').then(setUpdates).catch(() => {})
 
   // Counted over the packages this install actually has, not over every name in package.json: a
   // devDependency is not present on a server and there is nothing there to update.
@@ -147,7 +148,7 @@ export default function Settings({ status, theme, onTheme }) {
       setProgress({ done: i + 1, total: list.length, name: p.name })
     }
     setProgress(null)
-    setUpdates(await api('GET', '/api/settings/updates').catch(() => updates))
+    setUpdates(await api('GET', '/api/settings/updates?force=1').catch(() => updates))
     if (failed.length) throw new Error(failed.join('\n'))
     return `${list.length} updated — restart to load ${list.length === 1 ? 'it' : 'them'}`
   })
@@ -348,6 +349,10 @@ export default function Settings({ status, theme, onTheme }) {
             </table>
           )}
         </Section>
+
+        {/* Its own component: it owns a stream and a job's worth of state, and it is the one section
+            here that changes the machine rather than describing it. */}
+        <Stack />
 
         <Section title="Environment">
           <p className="sub">Read-only. These come from where this dashboard is installed — the service unit, or the built-in defaults.</p>

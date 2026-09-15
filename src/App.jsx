@@ -7,6 +7,8 @@ import Logs from './components/Logs.jsx'
 import Metrics from './components/Metrics.jsx'
 import Settings from './components/Settings.jsx'
 import Toaster from './components/Toaster.jsx'
+import Notifications from './components/Notifications.jsx'
+import { Confirmer, ask } from './confirm.jsx'
 
 // Sites first: the vhosts are what this dashboard is *for*, and Control is where you go when one
 // of them is not answering. The 01…05 prefixes are the array index, so this order is the only
@@ -54,9 +56,9 @@ export default function App() {
     return () => removeEventListener('beforeunload', warn)
   }, [dirty])
 
-  const go = t => {
+  const go = async t => {
     if (t === tab) return
-    if (dirty && !confirm('Discard unsaved changes to this site?')) return
+    if (dirty && !(await ask({ title: 'Discard unsaved changes?', body: 'The site you were editing has edits that have not been saved.', go: 'Discard', danger: true }))) return
     setDirty(false)
     setTab(t)
     location.hash = t
@@ -101,6 +103,7 @@ export default function App() {
         </div>
         <span className="strip-spacer" />
         {dry && <span className="tag" title="writes conf files but never calls nginx or systemctl">dry run</span>}
+        <Notifications onGo={go} />
         <div className="seg" role="group" aria-label="Theme">
           <button className={theme === 'dark' ? 'on' : ''} onClick={() => pick('dark')}>Dark</button>
           <button className={theme === 'light' ? 'on' : ''} onClick={() => pick('light')}>Light</button>
@@ -137,6 +140,7 @@ export default function App() {
         </main>
       </div>
       <Toaster />
+      <Confirmer />
     </div>
   )
 }

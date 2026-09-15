@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { ask } from '../confirm.jsx'
 import { Btn } from './ui.jsx'
 import SiteForm from './SiteForm.jsx'
 import NginxFiles from './NginxFiles.jsx'
@@ -33,9 +34,9 @@ export default function Sites({ onDirty, openSite, onOpened }) {
   }, [openSite])
 
   // Selecting unmounts the form and every edit in it. Ask first rather than lose them.
-  const select = name => {
+  const select = async name => {
     if (name === selected) return
-    if (dirty && !confirm('Discard unsaved changes to this site?')) return
+    if (dirty && !(await ask({ title: 'Discard unsaved changes?', body: 'The form you were editing closes, and the edits in it go with it.', go: 'Discard', danger: true }))) return
     markDirty(false)
     setSelected(name)
   }

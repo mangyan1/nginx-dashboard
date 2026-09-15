@@ -10,6 +10,9 @@ const { totp, newSecret } = await import('../lib/totp.js')
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const FIX = path.join(root, 'test', 'fixtures')
 const API = 'http://127.0.0.1:3123'
+// The server's own severity order for the bell, restated here so a list that is no longer sorted
+// fails rather than being compared against itself.
+const RANK = { err: 0, warn: 1, info: 2 }
 
 const env = {
   ...process.env,
@@ -77,6 +80,11 @@ try {
   // session exists rather than assumed to be behind the same middleware as everything else.
   check('...including the conf reader', (await req('GET', '/api/nginx-files/nxd')).status === 401)
   check('...and the updater', (await req('POST', '/api/settings/updates/apply', { name: 'express' })).status === 401)
+  // This one runs apt-get as root. It is the last route that should ever answer an anonymous caller.
+  check('...and the stack installer', (await req('POST', '/api/stack/install')).status === 401)
+  // What the bell would list is a description of this install's config, so it is behind the same
+  // middleware as the config itself.
+  check('...and the notifications', (await req('GET', '/api/notifications')).status === 401)
   // The one GET that must answer an anonymous caller: it is how the sign-in form knows whether to
   // draw the code field at all. `false` here, with no secret in the unit and none on disk.
   const anon = await req('GET', '/api/login')
@@ -165,6 +173,72 @@ try {
   check('an injection-shaped fpm endpoint is refused', (await req('PUT', '/api/sites/myapp', { php: { enabled: true, endpoint: 'unix:/run/php/x.sock; }' } })).status === 400)
   check('a site with no listener at all is refused', (await req('PUT', '/api/sites/myapp', { serveHttp: false, https: { mode: 'none' } })).status === 400)
   check('the conf is untouched after a refusal', fs.readFileSync(path.join(FIX, 'nginx', 'sites-available', 'myapp.conf'), 'utf8') === conf3)
+
+  // WordPress. The route is DRY-refused, so what is testable here is the *order* of its refusals —
+  // which is the part that matters, because extracting over an operator's docroot is the one
+  // irreversible thing it can do. The docroot is reset first: `www/` is not part of the fresh
+  // fixture tree above, and a leftover file would make "the placeholder and nothing else" a lie.
+  const wpRoot = path.join(FIX, 'www', 'wptest')
+  fs.rmSync(wpRoot, { recursive: true, force: true })
+  const wpt = await req('POST', '/api/sites', { name: 'wptest', domains: ['wptest.test'], root: wpRoot })
+  check('a site for the wordpress refusals', wpt.status === 200, JSON.stringify(wpt.body))
+  check('...whose docroot is the placeholder and nothing else', fs.readdirSync(wpRoot).join() === 'index.html')
+
+  const notReady = await req('POST', '/api/sites/wptest/wordpress')
+  check('WordPress on a site without PHP is refused, over the plain-text hazard',
+    notReady.status === 409 && /plain text/.test(notReady.body.error), JSON.stringify(notReady.body))
+  check('...and the same refusal names the front controller and index.php',
+    /front controller/.test(notReady.body.error) && /index\.php/.test(notReady.body.error), notReady.body.error)
+
+  await req('PUT', '/api/sites/wptest', {
+    index: 'index.php index.html',
+    php: { enabled: true, endpoint: 'unix:/run/php/php8.3-fpm.sock', frontController: true },
+  })
+  const dryWp = await req('POST', '/api/sites/wptest/wordpress')
+  check('a ready site is refused for the dry run, not for its config',
+    dryWp.status === 409 && /dry run/.test(dryWp.body.error), JSON.stringify(dryWp.body))
+  check('...and the refusal downloaded nothing into the docroot',
+    fs.readdirSync(wpRoot).join() === 'index.html')
+
+  fs.writeFileSync(path.join(wpRoot, 'notes.txt'), 'mine\n')
+  const occupied = await req('POST', '/api/sites/wptest/wordpress')
+  check('a docroot holding real files is refused before either of those',
+    occupied.status === 409 && /notes\.txt/.test(occupied.body.error), JSON.stringify(occupied.body))
+  check('...naming the directory it would have written over', occupied.body.error.includes(wpRoot), occupied.body.error)
+  check('cleanup the wordpress fixture', (await req('DELETE', '/api/sites/wptest')).body.ok === true)
+  fs.rmSync(wpRoot, { recursive: true, force: true })
+
+  // Deleting the document root along with the site. DRY, so what is asserted is that the *removal*
+  // was refused while the site deletion went through anyway — and, the one that matters, that the
+  // directory is still on disk. The demo's document roots are real absolute paths outside this
+  // fixture tree, so this assertion is the whole distance between a dry run and `rm -rf` on a box.
+  const delRoot = path.join(FIX, 'www', 'deltest')
+  fs.rmSync(delRoot, { recursive: true, force: true })
+  const mkDel = await req('POST', '/api/sites', { name: 'deltest', domains: ['deltest.test'], root: delRoot })
+  check('a site to delete the document root of', mkDel.status === 200, JSON.stringify(mkDel.body))
+  fs.writeFileSync(path.join(delRoot, 'keep.txt'), 'still here\n')
+
+  const withRoot = await req('DELETE', '/api/sites/deltest?root=1')
+  check('a delete with the document root is a dry run, not a failure',
+    withRoot.status === 200 && withRoot.body.ok === true, JSON.stringify(withRoot.body))
+  check('...and the sentence says the removal did not happen',
+    /dry mode/.test(String(withRoot.body.output)) && String(withRoot.body.output).includes(delRoot), String(withRoot.body.output))
+  check('...and the document root is still there, file and all',
+    fs.readFileSync(path.join(delRoot, 'keep.txt'), 'utf8') === 'still here\n')
+  check('...while the site itself is gone regardless',
+    !(await req('GET', '/api/sites')).body.sites.some(s => s.name === 'deltest'))
+
+  // A plain delete stays exactly what it was — no `output` key at all, which is what keeps the
+  // appended clause in `said()` unreachable unless the box was ticked.
+  const plainRoot = path.join(FIX, 'www', 'plaintest')
+  fs.rmSync(plainRoot, { recursive: true, force: true })
+  await req('POST', '/api/sites', { name: 'plaintest', domains: ['plaintest.test'], root: plainRoot })
+  const plain = await req('DELETE', '/api/sites/plaintest')
+  check('a plain delete is unchanged, and says nothing extra',
+    plain.status === 200 && plain.body.ok === true && !('output' in plain.body), JSON.stringify(plain.body))
+  check('...and leaves its document root where it was', fs.existsSync(plainRoot))
+  fs.rmSync(plainRoot, { recursive: true, force: true })
+  fs.rmSync(delRoot, { recursive: true, force: true })
 
   // The defaults the form reads. A "use default" chip can only be honest if it shows the value the
   // server would actually apply, so the client fetches them instead of keeping a second copy —
@@ -319,6 +393,39 @@ try {
   check('traversal is refused', (await req('GET', '/api/nginx-files/..%2Fstate%2Fmanifest.json')).status === 404)
   check('a name that is not there is 404', (await req('GET', '/api/nginx-files/nosuch')).status === 404)
 
+  // ---- notifications: the same facts, collected for the bell ----
+  // A second, milder problem on purpose: one item cannot tell a sorted list from an unsorted one, and
+  // `myapp` is discovered before the dangling link below, so without the sort the warn would lead.
+  const myappConf = path.join(FIX, 'nginx', 'sites-available', 'myapp.conf')
+  const myappText = fs.readFileSync(myappConf, 'utf8')
+  fs.writeFileSync(myappConf, myappText + '\n# edited by hand\n')
+  const notes = await req('GET', '/api/notifications')
+  // Asked twice with the disk in the same state: nothing is stored, so nothing can be marked read
+  // and the second answer has to be the first one again.
+  const again = await req('GET', '/api/notifications')
+  fs.writeFileSync(myappConf, myappText)
+  check('the bell has something to list', notes.status === 200 && Array.isArray(notes.body.items), JSON.stringify(notes.body).slice(0, 200))
+  // The dangling link made two blocks up, seen from the other end. This is the one file fault that
+  // stops nginx starting at all, so it is the item that has to be there and has to be an error.
+  const danglingNote = notes.body.items.find(i => i.id === 'dangling-vanished.conf')
+  check('...and the dangling symlink on disk is in it, as an error',
+    danglingNote?.kind === 'err' && danglingNote.tab === 'sites', JSON.stringify(danglingNote ?? null))
+  check('...and a conf edited by hand is in it too, as a warning',
+    notes.body.items.find(i => i.id === 'drift-modified-myapp')?.kind === 'warn')
+  // Every item must say where the fix is or say so by leaving `tab` empty — a tab id that is not one
+  // of the five would be a button that goes nowhere.
+  check('...every item naming a tab names a real one',
+    notes.body.items.every(i => ['sites', 'control', 'logs', 'metrics', 'settings', ''].includes(i.tab)),
+    JSON.stringify(notes.body.items.map(i => i.tab)))
+  check('...and asking again over the same state gives the same list, because none of it is stored',
+    JSON.stringify(again.body.items) === JSON.stringify(notes.body.items),
+    JSON.stringify(again.body.items.map(i => i.id)))
+  // Worst first. The manifest happens to hold `demo` before `app` here, so this is checking the
+  // sort rather than an accident of insertion order.
+  check('...worst first, not the order the problems were found in',
+    notes.body.items.every((i, n) => !n || RANK[notes.body.items[n - 1].kind] <= RANK[i.kind]),
+    JSON.stringify(notes.body.items.map(i => i.kind)))
+
   // ---- dependency updates ----
   const deps = await req('GET', '/api/settings/updates')
   check('the update check lists this project\'s dependencies',
@@ -329,6 +436,11 @@ try {
     deps.body.packages.find(p => p.name === 'express')?.updatable === true)
   check('...and a build-time one is not, because npm moving it changes nothing served',
     deps.body.packages.find(p => p.name === 'react')?.updatable === false)
+  // The bell reads that answer through a six-hour cache and the panel forces it past. Same route and
+  // the same question, so the force has to mean "ask again", not "answer differently".
+  const forced = await req('GET', '/api/settings/updates?force=1')
+  check('forcing the check asks again and answers the same question',
+    forced.status === 200 && forced.body.packages.length === deps.body.packages.length, JSON.stringify(forced.body).slice(0, 120))
   check('the restart is refused when nothing is supervising this process',
     (await req('POST', '/api/settings/restart')).status === 409)
   check('installing a build-time dependency is refused',
@@ -339,6 +451,24 @@ try {
   // mode nothing is installed, whatever the registry said.
   check('a dry run installs nothing',
     (await req('POST', '/api/settings/updates/apply', { name: 'express' })).status === 409)
+
+  // the stack. The status read is real work on any box — it shells out to lemp.sh --detect — and the
+  // install is the one route here that can change the machine, so DRY refusing it is the point.
+  const stack = await req('GET', '/api/stack')
+  check('stack status answers', stack.status === 200 && stack.body.dry === true, JSON.stringify(stack.body))
+  // Asserted by name, not by count: unzip is present on some dev boxes and absent on others, so a
+  // length check would pass or fail on the platform rather than on the code.
+  check('...and reports the php and database halves missing, which they are here',
+    stack.body.missing.includes('PHP-FPM') && stack.body.missing.includes('a database server'),
+    JSON.stringify(stack.body.missing))
+  check('installing the stack is refused in dry mode',
+    (await req('POST', '/api/stack/install')).status === 409)
+  // `res.json`, then the SSE route, so a client that skips the POST cannot be left watching a stream
+  // that will never say anything.
+  const stackStream = await fetch(API + '/api/stack/install/stream', { headers: { cookie } })
+  const stackText = await new Response(stackStream.body).text()
+  check('...and the stream says nothing is running rather than hanging',
+    stackText.includes('no install is running'), JSON.stringify(stackText.slice(0, 120)))
 
   // logs SSE
   const sse = await fetch(API + '/api/logs/tail?file=access', { headers: { cookie } })
@@ -668,6 +798,33 @@ try {
 } finally {
   server.kill()
 }
+
+// A password printed in this repository must not start a dashboard. This is the one check that has
+// to run against a process that never binds, so it is a spawn of its own rather than a request.
+async function boot(pw, extra = {}) {
+  const p = spawn(process.execPath, [path.join(root, 'server.js')],
+    { env: { ...env, DASH_PORT: '3124', DASH_PASSWORD: pw, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] })
+  let err = ''
+  p.stderr.on('data', d => { err += d })
+  const code = await new Promise(r => { p.on('exit', r); setTimeout(() => { p.kill(); r('still running') }, 5000) })
+  return { code, err }
+}
+
+const placeholder = await boot('change-me')
+check('the placeholder from the shipped unit refuses to start',
+  placeholder.code === 1 && placeholder.err.includes('placeholder'), `${placeholder.code} ${placeholder.err.slice(0, 80)}`)
+check('...and so does a password of "demo"', (await boot('demo')).code === 1)
+
+// ...but DASH_DEMO=1 is the deliberate way past it. Asserted as "has not exited" rather than by
+// waiting for a bind: a slow start on a loaded box would otherwise read as a refusal.
+const demoRun = spawn(process.execPath, [path.join(root, 'server.js')],
+  { env: { ...env, DASH_PORT: '3124', DASH_PASSWORD: 'demo', DASH_DEMO: '1' }, stdio: ['ignore', 'pipe', 'pipe'] })
+let demoErr = ''
+demoRun.stderr.on('data', d => { demoErr += d })
+await new Promise(r => setTimeout(r, 1200))
+check('...while DASH_DEMO=1 starts anyway, which is what npm run demo uses',
+  demoRun.exitCode === null && !demoErr.includes('placeholder'), demoErr.slice(0, 80))
+demoRun.kill()
 
 console.log(failed ? `\n${failed} of ${ran} FAILED` : `\nall ${ran} checks passed`)
 process.exit(failed ? 1 : 0)
