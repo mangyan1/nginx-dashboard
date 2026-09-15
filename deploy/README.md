@@ -17,14 +17,14 @@ ssh user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh'
 `install.sh` is idempotent — re-running it upgrades outdated dependencies
 (node, nginx, certbot, npm packages) and refreshes the app files.
 
-CI installs the whole thing onto a fresh Debian 12, Ubuntu 22.04 and Ubuntu 24.04
+CI installs the whole thing onto a fresh Debian 12 and 13, Ubuntu 22.04, 24.04 and 26.04
 (`test/install-container.sh`): it runs the installer twice, boots what it installed, logs in
 with the password the installer generated and calls an authenticated endpoint. That is what
 caught the installer calling `curl` and `rsync` without installing either — a bare Debian
 image has neither. The same check runs here, minus systemd, which no container has:
 
 ```bash
-docker run --rm -v "$PWD:/src" debian:12 bash /src/test/install-container.sh
+docker run --rm -v "$PWD:/src" debian:13 bash /src/test/install-container.sh
 ```
 
 ## The stack (optional)

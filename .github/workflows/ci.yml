@@ -114,19 +114,22 @@ jobs:
     # installer calling `curl` and `rsync` without ever installing them, which is what it did — a
     # bare debian:12 image has neither, so a fresh install died on "curl: command not found".
     #
-    # Debian 12 is the oldest release still getting security updates and the two Ubuntu LTS releases
-    # are what the README tells people to run. The version in test/Dockerfile.e2e is deliberately
-    # not one of them: that image is a test fixture, this matrix is the claim that installing works.
+    # Five images, in two roles. The release a server installs today — Debian 13 trixie, Ubuntu
+    # 26.04 — is where a fresh install breaks; the older releases still inside their support window
+    # are where an upgrade breaks, and that is most of the machines this actually runs on. Debian 13
+    # was the one missing first: a matrix framed around "oldest still supported" tests the box nobody
+    # has any more, since a new one is trixie. The node image in test/Dockerfile.e2e is deliberately
+    # not one of these — that is a test fixture, this matrix is the claim that installing works.
     name: install (${{ matrix.image }})
     runs-on: ubuntu-latest
     # apt, NodeSource and npm all over the network, three images side by side. The six-hour default
     # would hide a hung container behind five hours of nothing.
     timeout-minutes: 20
     strategy:
-      # All three, always: "works on 24.04" is not made clearer by never hearing about 22.04.
+      # All five, always: "works on 13" is not made clearer by never hearing about 12.
       fail-fast: false
       matrix:
-        image: ['debian:12', 'ubuntu:22.04', 'ubuntu:24.04']
+        image: ['debian:12', 'debian:13', 'ubuntu:22.04', 'ubuntu:24.04', 'ubuntu:26.04']
     steps:
       - uses: actions/checkout@v7
       # Mounted, not copied, so install.sh sees the tree exactly as the operator's `scp -r .` would
