@@ -1,0 +1,107 @@
+# Continuous integration. This could not exist before 2026-09-14: on this account's private
+# repositories an Actions job queued until GitHub cancelled it a day later — Dependabot's own run
+# sat for 24h0m5s and then died — so writing one would have been writing something that never ran.
+# Public repositories get runners for free, which is most of what going public bought.
+#
+# Three jobs, split by what each one needs rather than by module, so a red run names its own cause
+# instead of "the test job failed": the API suites are plain Node, the build check needs only the
+# dev dependencies, and the nginx suite needs Docker.
+#
+# Two things are deliberately absent. A release workflow, because `dist/` is committed and a tag
+# already gets GitHub's own source tarball, so an extra artifact would be a near-duplicate of one
+# that appears for free. And an image published to ghcr.io, because this dashboard's control module
+# drives systemd and a host nginx — test/Dockerfile.e2e says in as many words that start, stop and
+# restart cannot work in a container. Shipping an image whose restart button is a lie is worse than
+# shipping no image.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only. Nothing in here writes back to the repository, and on a public repo the token should
+# be assumed hostile until proven otherwise.
+permissions:
+  contents: read
+
+# A second push to the same branch makes the first run's result irrelevant, and the nginx job
+# builds a Docker image — cancelling is worth more here than the queue slot it frees.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    # The matrix is the `engines` field kept honest. package.json promises >=22.12.0, which is a
+    # claim about the operator's server rather than about this checkout, and 24 is what
+    # test/Dockerfile.e2e actually ships on. Anything that works only on 24 would otherwise pass
+    # here and fail on a box running the floor.
+    name: api (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Both legs, always. A failure on 24 is not made clearer by never hearing about 22.
+      fail-fast: false
+      matrix:
+        node: ['22.12.0', '24']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      # `ci`, not `install`: it takes the lockfile exactly and fails when package.json has drifted
+      # from it, which is a check in its own right.
+      - run: npm ci
+      # smoke.mjs boots the server in DRY mode against a fixture tree it generates itself, so this
+      # needs no nginx, no root and no www-data — which is why it is the job that can run anywhere.
+      # safe-apply.mjs covers the mutation pipeline DRY mode never reaches, and client.mjs the
+      # framework-free client modules.
+      - run: npm test
+
+  dist:
+    # `dist/` is committed, because the installer copies the working tree to a server and a build
+    # step there is a step an operator can skip. The price is that a source change nobody rebuilt
+    # ships stale JavaScript, and no test in the suite can see it: the suites import `src/`, while
+    # the browser loads `dist/`. This job is the only thing standing between those two facts.
+    name: dist is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # The exit code, rather than `git status` — .gitattributes normalises line endings when it
+      # compares, so a build on a machine with different CRLF settings does not read as a diff.
+      # A committed `dist/` rebuilt on Windows and checked on Linux is exactly that case.
+      - run: git diff --exit-code -- dist/
+      # Named, so the failure says what to do instead of leaving "the build job went red".
+      - if: failure()
+        run: |
+          echo "::error::dist/ is stale — run 'npm run build' and commit the result."
+          git diff --stat -- dist/
+
+  nginx:
+    # The only job with a real nginx in it. docker-conf.mjs validates a fully-featured generated
+    # vhost with `nginx -t` inside the official image; e2e.mjs drives the live API against a real
+    # nginx and checks what nginx actually does — real reloads, real traffic, a real rollback. The
+    # rest of the suite either runs in DRY mode or validates generated text, so this is where a
+    # config that is syntactically valid but functionally wrong gets caught.
+    name: nginx (docker)
+    runs-on: ubuntu-latest
+    # Building the image installs nginx, openssl, curl and logrotate. A hung container would
+    # otherwise sit here for the six-hour default.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:docker
+      - run: npm run test:e2e
