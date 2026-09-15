@@ -188,6 +188,11 @@ the document root.
 
 - **The credentials live only in `wp-config.php`** (mode 0640). Nothing about
   them is written to the manifest or to settings.
+- **The tree is chowned to `www-data`** once it is in place. This dashboard runs
+  as root, so without that step every file lands root-owned and php-fpm cannot
+  read `wp-config.php` — the site cannot boot at all — nor create
+  `wp-content/uploads` afterwards. Read access alone is not enough, which is why
+  it is a recursive chown rather than a mode.
 - **All of it happens outside the config pipeline and outside the manifest**, in
   a scratch directory first — the document root is touched only once the
   download, the database and the config have all succeeded. A failure leaves a

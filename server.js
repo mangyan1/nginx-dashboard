@@ -1012,6 +1012,20 @@ app.post('/api/sites/:name/wordpress', async (req, res) => {
     await writeWpConfig(src, { dbName: site.name, password })
 
     fs.cpSync(src, site.root, { recursive: true, force: true })
+    // The tree has to belong to the web user before it is any use. This process runs as root and
+    // cpSync copies mode but never ownership, so everything above lands root:root while php-fpm runs
+    // as www-data — and read alone is not enough, because WordPress creates wp-content/uploads and
+    // rewrites its own files, so a tree it cannot write serves a homepage and nothing else. `-R`
+    // because every directory it needs to write into is inside. The chmod below cannot substitute:
+    // 0640 root:root is unreadable to php-fpm however the bits are set. Hardcoded rather than
+    // detected, unlike the socket: www-data is the user on both platforms this targets and is a name
+    // that does not move between releases the way php8.3-fpm does.
+    const owned = await shell('chown', ['-R', 'www-data:www-data', site.root], { timeout: 60_000 })
+    if (owned.status !== 0) {
+      // No cleanup: the files are already in the docroot and the route refuses a retry while it is
+      // occupied, so the state after this is one the operator has to be told how to leave.
+      throw new Error(`${(owned.stderr || '').trim() || 'chown failed'} — WordPress was written to ${site.root} but is still owned by root, so php-fpm cannot read it. Delete the site with its document root, then create it again.`)
+    }
     // not carried reliably by cpSync, and this is the file with the password in it
     fs.chmodSync(path.join(site.root, 'wp-config.php'), 0o640)
     // the placeholder would otherwise win the site's root URL: nginx resolves `/` through `index`,
