@@ -93,6 +93,9 @@ Two places the version matters more than usual:
 - **HTTP/3** (the per-site toggle) needs nginx ≥ 1.25, and every release from
   1.25 up to 1.30.0 has an open HTTP/3 advisory (address spoofing). It is off
   by default and worth leaving off until the distribution's nginx is past that.
+  It also needs a build with `--with-http_v3_module`; `nginx -V` says whether
+  yours has it, and a build without it makes the toggle fail `nginx -t` on save
+  rather than quietly serving HTTP/2 only.
 - **TLS session resumption** across sites sharing one IP and port was fixed in
   1.26.3 / 1.27.4 (CVE-2025-23419). Debian 13 and Ubuntu 26.04 are past it;
   older releases depend on the backport. Generated configs already set

@@ -12,8 +12,9 @@ const GZIP_TYPES = ['text/css', 'application/javascript', 'application/json', 'i
 const CACHE_EXT = ['css', 'js', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'woff', 'woff2', 'pdf']
 
 // What a new row starts as, shared by the "+" button and the row's own chip so the two can never
-// disagree. Only the fields the chip governs are listed: a proxy rule carries a `verify` flag this
-// form does not show, and a reset must merge rather than replace it.
+// disagree. Only the fields the chip governs are listed: a proxy rule's `verify`/`ca` pair is shown
+// below the row and not by the chip, and a reset must merge rather than replace it — a chip click
+// that dropped `verify` would quietly stop checking a backend's certificate.
 const PROXY_ROW = { path: '/', target: 'http://127.0.0.1:8080' }
 const SERVER_ROW = { scheme: 'http', host: '127.0.0.1', port: 3001 }
 // `hash` is the stored password and `password` is what is being typed. The password box is
@@ -367,15 +368,34 @@ function SiteEditor({ site, D, onSaved, onDeleted, onDirty }) {
 
       <Section title="Reverse proxy">
         <p className="hint">Route paths to any backend — another app, container, or remote instance (http:// or https://host:port).</p>
-        {s.proxy.map((p, i) => (
-          <div className="row" key={i}>
-            <input value={p.path} placeholder={PROXY_ROW.path} onChange={e => setArr('proxy', s.proxy.map((x, j) => j === i ? { ...x, path: e.target.value } : x))} />
-            <input value={p.target} placeholder={PROXY_ROW.target} onChange={e => setArr('proxy', s.proxy.map((x, j) => j === i ? { ...x, target: e.target.value } : x))} />
-            <Chip def={PROXY_ROW} value={p} title={`use the default rule: ${PROXY_ROW.path} → ${PROXY_ROW.target}`}
-              onUse={d => setArr('proxy', s.proxy.map((x, j) => j === i ? { ...x, ...d } : x))} />
-            <Btn kind="danger" onClick={() => setArr('proxy', s.proxy.filter((_, j) => j !== i))}>✕</Btn>
-          </div>
-        ))}
+        {s.proxy.map((p, i) => {
+          const set = obj => setArr('proxy', s.proxy.map((x, j) => j === i ? { ...x, ...obj } : x))
+          // Offered only where the generated config would honour it: an https:// target, or a pool
+          // with at least one https backend. A plain-http backend gets no proxy_ssl directives at
+          // all, so a switch here would be a control that changes nothing.
+          const ref = String(p.target || '')
+          const tls = ref.startsWith('https://') || (ref.startsWith('upstream:')
+            && (s.upstreams.find(u => u.name === ref.slice(9))?.servers || []).some(x => x.scheme === 'https'))
+          return (
+            <div key={i}>
+              <div className="row">
+                <input value={p.path} placeholder={PROXY_ROW.path} onChange={e => set({ path: e.target.value })} />
+                <input value={p.target} placeholder={PROXY_ROW.target} onChange={e => set({ target: e.target.value })} />
+                <Chip def={PROXY_ROW} value={p} title={`use the default rule: ${PROXY_ROW.path} → ${PROXY_ROW.target}`}
+                  onUse={d => set(d)} />
+                <Btn kind="danger" onClick={() => setArr('proxy', s.proxy.filter((_, j) => j !== i))}>✕</Btn>
+              </div>
+              {tls && <>
+                <Toggle checked={p.verify === true} onChange={v => set({ verify: v })}
+                  label="Check the backend's certificate — off means an https backend is accepted whatever it presents" />
+                {p.verify === true && <Field label="CA file">
+                  <input value={p.ca || ''} placeholder="empty = the system trust store"
+                    onChange={e => set({ ca: e.target.value })} />
+                </Field>}
+              </>}
+            </div>
+          )
+        })}
         <Btn onClick={() => setArr('proxy', [...s.proxy, { ...PROXY_ROW, verify: false }])}>+ proxy rule</Btn>
         <p className="hint">Empty proxy list = serve static files from the document root, resolving <code>/about</code> to <code>about.html</code> as well as <code>about/index.html</code> — which is what a static Astro or Next export needs. A rule on <code>/</code> replaces that.</p>
       </Section>

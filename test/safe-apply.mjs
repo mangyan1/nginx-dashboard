@@ -222,6 +222,17 @@ check('an old manifest is filled in on read', legacy.php?.enabled === false && l
 check('an old manifest still renders', renderSiteConf(legacy).includes('listen 80;') && !renderSiteConf(legacy).includes('undefined'), renderSiteConf(legacy))
 fs.writeFileSync(MANIFEST, '{"sites":[]}\n')
 
+// The form's verify/CA pair has to survive the round-trip through the manifest, or the switch would
+// look saved and write nothing — readManifest normalises every site, and a normaliser that rebuilds
+// a proxy row from `path`/`target` alone would drop both fields silently.
+fs.writeFileSync(MANIFEST, JSON.stringify({
+  sites: [{ ...defaultSite('v'), domains: ['v.test'], proxy: [{ path: '/', target: 'https://10.0.0.2:8443', verify: true, ca: '/etc/ssl/private/own-ca.pem' }] }],
+}))
+const rt = readManifest().sites[0].proxy[0]
+check('a proxy rule keeps its verify flag and CA across a read',
+  rt.verify === true && rt.ca === '/etc/ssl/private/own-ca.pem', JSON.stringify(rt))
+fs.writeFileSync(MANIFEST, '{"sites":[]}\n')
+
 // ---- 8. a proxy rule must not drop the docroot ----
 // Emitting only the proxy locations left the site with no `root`, so every other path fell
 // through to nginx's compiled-in default root and served its stock welcome page.
@@ -474,6 +485,16 @@ const poolSite = t => ({
 check('the flag means the same on a backend pool',
   renderSiteConf(poolSite({ verify: true })).includes('proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;')
   && renderSiteConf(poolSite({})).includes('proxy_ssl_verify off;'))
+// SNI is off by default in nginx, and proxy_ssl_name defaults to the host part of proxy_pass — which
+// for a pool is the generated name `site_app`, a name no certificate carries.
+check('TLS to a backend always sends SNI', vOn.includes('proxy_ssl_server_name on;') && renderSiteConf(poolSite({})).includes('proxy_ssl_server_name on;'))
+check('a direct https target keeps nginx\'s own name default', !vOn.includes('proxy_ssl_name'), vOn.split('\n').filter(l => l.includes('proxy_ssl_name')).join(' | '))
+check('a pool names the backend, because the pool name is not a host',
+  renderSiteConf(poolSite({ verify: true })).includes('proxy_ssl_name 10.0.0.2;'),
+  renderSiteConf(poolSite({ verify: true })).split('\n').filter(l => l.includes('proxy_ssl_name')).join(' | '))
+// `$host` is the name with the port dropped, so a site on a non-443 TLS port would hand the backend a
+// Host that names a port this server does not listen on — and a redirect built from it would 404.
+check('the proxied Host is passed verbatim, port and all', prox.includes('proxy_set_header Host $http_host;'), prox)
 
 check('a typo in an ip rule is refused', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['192.168.1.0/24', 'not-an-ip'] } }).some(e => e.includes('invalid ip rule')))
 check('a blank ip rule row is not an error', validateSite({ ...defaultSite('i'), ipRules: { mode: 'allowlist', ips: ['192.168.1.0/24', ''] } }).length === 0)
