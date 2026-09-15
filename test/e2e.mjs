@@ -239,6 +239,25 @@ try {
   check('live-tailed a request made after the stream opened', seen.includes('sse-canary'), JSON.stringify(seen.slice(-160)))
   await reader.cancel()
 
+  // ---- rotating the logs ----
+  // Deliberately not an assertion on what the endpoint reports: logrotate renames the file and
+  // exits 0 whether or not the reopen happened, and a fresh empty access.log looks like success
+  // from every angle except where the bytes go. So this asserts on the bytes, which needs a real
+  // nginx holding a real inode to mean anything.
+  const accessLog = '/var/log/nginx/access.log'
+  viaNginx('myapp.test', '/pre-rotate-canary')
+  check('the access log has traffic to rotate', fs.statSync(accessLog).size > 0)
+  const rot = await req('POST', '/api/logs/rotate')
+  check('rotate reports ok', rot.body.ok === true, JSON.stringify(rot.body))
+  check('...the live file was renamed', fs.existsSync(accessLog + '.1'))
+  check('...and replaced by an empty one', fs.existsSync(accessLog) && fs.statSync(accessLog).size === 0)
+  const held = fs.statSync(accessLog + '.1').size
+  viaNginx('myapp.test', '/post-rotate-canary')
+  check('...which is where the next request landed', read(accessLog)?.includes('post-rotate-canary'),
+    JSON.stringify(read(accessLog)?.slice(-120)))
+  check('...and nothing more went to the rotated file', fs.statSync(accessLog + '.1').size === held,
+    `${held} -> ${fs.statSync(accessLog + '.1').size}`)
+
   // ---- the dashboard's own vhost, under a real nginx ----
   // Everything above serves a site *outward*. This one serves the dashboard itself, and it is the
   // only place these guards meet a genuine `nginx -t` and real traffic: DRY mode never loads the

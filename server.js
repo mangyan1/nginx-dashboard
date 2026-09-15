@@ -1173,7 +1173,15 @@ app.get('/api/logs/tail', (req, res) => {
 app.post('/api/logs/rotate', async (req, res) => {
   if (DRY) return res.json({ ok: true, output: 'dry mode' })
   const r = await shell('logrotate', ['-f', '/etc/logrotate.d/nginx'])
-  res.json(r.status === 0 ? { ok: true, output: 'rotated' } : { ok: false, output: r.stderr.trim() })
+  if (r.status !== 0) return res.json({ ok: false, output: r.stderr.trim() })
+  // The reopen is ours, not the distribution's. logrotate only renames; the signal that makes
+  // nginx let go of the old inode is supposed to come from that file's postrotate, which is
+  // `invoke-rc.d nginx rotate` — denied by policy-rc.d inside a container, silently, exit 0.
+  // nginx writes on to the renamed file and the fresh one stays empty for ever, while logrotate
+  // still reports success. Rename-then-signal is the documented order either way, so doing it
+  // here is the same thing one step closer to the code that depends on it.
+  const s = await shell('nginx', ['-s', 'reopen'])
+  res.json(s.status === 0 ? { ok: true, output: 'rotated' } : { ok: false, output: s.stderr.trim() })
 })
 
 app.post('/api/logs/purge', async (req, res) => {

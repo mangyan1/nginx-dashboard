@@ -80,6 +80,10 @@ ensure_node
 ensure_apt_pkg nginx nginx
 ensure_apt_pkg certbot certbot
 ensure_apt_pkg unzip unzip
+# logrotate only ever runs from the dashboard's own rotate endpoint, so nothing here needs it —
+# but it is priority:important rather than a dependency of nginx, which means a minimal image has
+# nginx, a working rotate button and no logrotate behind it.
+ensure_apt_pkg logrotate logrotate
 command -v openssl >/dev/null || apt_install openssl
 
 # ---------- 1b. the stack (opt-in) ----------
