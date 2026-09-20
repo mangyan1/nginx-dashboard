@@ -34,9 +34,10 @@ Opens on http://127.0.0.1:7412, password `demo`.
 
 ## Install on a server
 
-Copy the folder (including `dist/`) to the server and run the installer:
-
 ```bash
+npm install
+npm run build                       # produces dist/
+scp -r . user@server:/tmp/nginx-dashboard
 ssh user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh'
 ```
 
