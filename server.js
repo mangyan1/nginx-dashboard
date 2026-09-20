@@ -75,7 +75,7 @@ if (!PASSWORD) {
 const PLACEHOLDERS = new Set(['change-me', 'changeme', 'demo', 'password', 'admin'])
 if (PLACEHOLDERS.has(PASSWORD.trim().toLowerCase()) && process.env.DASH_DEMO !== '1') {
   console.error(
-    `DASH_PASSWORD is "${PASSWORD}", a placeholder that ships in this repository.\n` +
+    `DASH_PASSWORD is set to a placeholder that ships in this repository.\n` +
     `Set a real one in /etc/systemd/system/nginx-dashboard.service:\n` +
     `    Environment=DASH_PASSWORD=$(openssl rand -hex 12)\n` +
     `then: systemctl daemon-reload && systemctl restart nginx-dashboard\n` +
@@ -934,7 +934,9 @@ app.post('/api/sites/:name/files', upload.array('files'), async (req, res) => {
     // can write into is the same problem one level up.
     const bad = await handToWebUser([dir, ...written])
     if (bad) return res.status(400).json({ error: `${bad} — the files are in ${dir} but are still owned by root, so a PHP site cannot rewrite them` })
-    res.json({ ok: true, count: (req.files || []).length })
+    // counted from what was actually moved, not the request's file list: the two only agree
+    // when every rename succeeded, and the request field is not the source of truth here
+    res.json({ ok: true, count: written.length })
   } catch (e) {
     res.status(400).json({ error: e.message })
   }
