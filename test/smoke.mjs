@@ -110,6 +110,21 @@ try {
   check('placeholder index written', fs.existsSync(path.join(FIX, 'www', 'myapp', 'index.html')))
   check('http conf generated', fs.readFileSync(path.join(FIX, 'nginx', 'conf.d', '00-dashboard.conf'), 'utf8').includes('# managed by nginx-dashboard'))
 
+  // Two creates at once used to read the manifest together and write it one after the other: the
+  // second write erased the first site from the manifest while its conf stayed behind on disk.
+  // Mutating requests are queued now, so "last write wins" became "last request wins" and both
+  // sites land. Two creates is the smallest overlap there is, and both must come back.
+  const [raceA, raceB] = await Promise.all([
+    req('POST', '/api/sites', { name: 'race-a', domains: ['race-a.test'], root: path.join(FIX, 'www', 'race-a') }),
+    req('POST', '/api/sites', { name: 'race-b', domains: ['race-b.test'], root: path.join(FIX, 'www', 'race-b') }),
+  ])
+  const raceList = (await req('GET', '/api/sites')).body.sites
+  check('two concurrent creates both land',
+    raceA.status === 200 && raceB.status === 200 &&
+    raceList.some(s => s.name === 'race-a') && raceList.some(s => s.name === 'race-b'),
+    JSON.stringify({ a: raceA.status, b: raceB.status }))
+  check('cleanup', (await req('DELETE', '/api/sites/race-a')).body.ok === true && (await req('DELETE', '/api/sites/race-b')).body.ok === true)
+
   // enable/disable
   check('enable site', (await req('POST', '/api/sites/myapp/enable')).body.ok === true)
   check('symlink created', fs.existsSync(path.join(FIX, 'nginx', 'sites-enabled', 'myapp.conf')))
@@ -293,6 +308,19 @@ try {
   check('...and turning it off writes no auth_basic at all',
     !fs.readFileSync(path.join(FIX, 'nginx', 'sites-available', 'myapp.conf'), 'utf8').includes('auth_basic'))
 
+  // The password file is inside the transaction now, so its lifecycle follows the site's: a
+  // delete takes it away with the conf and the manifest row, instead of leaving a hash file
+  // behind for a site that no longer exists. (Turning basic auth *off* still leaves it — that
+  // is deliberate, and writeHtpasswd's comment says why.)
+  const authdel = await req('POST', '/api/sites', {
+    name: 'authdel', domains: ['authdel.test'], root: path.join(FIX, 'www', 'authdel'),
+    basicAuth: { enabled: true, users: [{ user: 'carl', password: 'pw1' }] },
+  })
+  check('a site with basic auth is created', authdel.status === 200, JSON.stringify(authdel.body))
+  check('...and its password file is written', fs.readFileSync(path.join(FIX, 'htpasswd', 'authdel'), 'utf8').startsWith('carl:$apr1$'))
+  check('deleting the site takes its password file with it',
+    (await req('DELETE', '/api/sites/authdel')).body.ok === true && !fs.existsSync(path.join(FIX, 'htpasswd', 'authdel')))
+
   // last, because it changes the conf: a proxy rule on `/` and the front controller are both
   // `location /`, and nginx refuses a duplicate — the proxy rule is the one that wins
   const rootProxy = await req('PUT', '/api/sites/myapp', { proxy: [{ path: '/', target: 'http://127.0.0.1:8080' }] })
@@ -314,6 +342,19 @@ try {
   check('a blank docroot is filled from that same default',
     filled.status === 200 && filled.body.site.root === '/var/www/catchall', JSON.stringify(filled.body.site?.root))
   check('cleanup', (await req('DELETE', '/api/sites/catchall')).body.ok === true)
+
+  // A key that is not a site field used to ride into the manifest for ever — unread by anything
+  // and uncleanable by any save. The defaults overlay refuses such a key by name (`not a site
+  // field`); a save draws the same line silently, because the client that sent the typo still
+  // gets a site that works.
+  const junked = await req('POST', '/api/sites', {
+    name: 'junktest', domains: ['junktest.test'], root: path.join(FIX, 'www', 'junktest'),
+    gzipp: { enabled: false }, bogus: 1,
+  })
+  check('an unknown body key is dropped, not stored',
+    junked.status === 200 && !('bogus' in junked.body.site) && !('gzipp' in junked.body.site),
+    JSON.stringify(Object.keys(junked.body.site || {})))
+  check('cleanup', (await req('DELETE', '/api/sites/junktest')).body.ok === true)
 
   // the static fallback, the request-body limit and HSTS — through the API, since these are
   // new fields and the round trip is what proves sanitizeSite does not drop them

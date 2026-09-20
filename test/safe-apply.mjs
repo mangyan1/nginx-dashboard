@@ -106,6 +106,38 @@ r = await safeApply([conf], () => { fs.writeFileSync(conf, 'NEW CONF\n') })
 check('failed reload reports not-ok', !r.ok && String(r.output).includes('invalid PID number'), JSON.stringify(r))
 check('failed reload restores the file', read(conf) === ORIG[conf], read(conf))
 
+// ---- 4c. an async mutate is awaited, not fired ----
+// The routes hash passwords with openssl inside mutate(), so the pipeline has to wait for it:
+// nginx -t must see the writes, and a throw after the yield must be caught — not become an
+// unhandled rejection that kills the process while the files stay half-written.
+hooks.run = passNginx
+seed()
+let sawAtTest = null
+const probe = async (cmd, args) => {
+  if (args.includes('-t')) sawAtTest = read(conf)
+  return passNginx(cmd, args)
+}
+hooks.run = probe
+let asyncDone = false
+r = await safeApply([conf], async () => {
+  await Promise.resolve() // the write lands after the event loop turns, not inside mutate()'s call
+  fs.writeFileSync(conf, 'NEW CONF\n')
+  asyncDone = true
+})
+check('nginx -t runs after an async mutate\'s writes, not during them',
+  r.ok && sawAtTest === 'NEW CONF\n' && asyncDone, JSON.stringify({ r, sawAtTest }))
+
+hooks.run = failTest
+seed()
+r = await safeApply([conf], async () => {
+  await Promise.resolve()
+  fs.writeFileSync(conf, 'NEW CONF\n')
+  throw new Error('openssl passwd failed')
+})
+check('an async mutate that throws is caught, not an unhandled rejection',
+  !r.ok && String(r.output).includes('openssl passwd failed'), JSON.stringify(r))
+check('...and its writes are rolled back', read(conf) === ORIG[conf], read(conf))
+
 // ---- 5. regression: MANIFEST must be inside the transaction ----
 // server.js writes the manifest from inside mutate(); if it is not listed in `files`, a
 // failed nginx -t rolls back the conf but keeps the manifest change (a phantom site).

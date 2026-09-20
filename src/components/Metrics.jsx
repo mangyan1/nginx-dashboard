@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import Chart from 'chart.js/auto'
+// Registered by hand rather than `chart.js/auto`, which pulls every controller and scale into the
+// bundle for the sake of one line chart. This is the whole set the chart below touches: a line
+// controller with its element and points, two scales, the area fill, and hover tooltips. A new
+// chart type here needs its own registration — the failure mode is a blank canvas, not an error.
+import { Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, Tooltip } from 'chart.js'
 import { api } from '../api.js'
+
+Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, Tooltip)
 
 const TILES = [
   ['active', 'Active connections'],

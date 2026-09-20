@@ -15,6 +15,7 @@ import {
   SELF_NAME, isSelf, defaultSite, readManifest, writeManifest, siteConfPath, enabledConfPath, certDir,
   renderHttpConf, renderSiteConf, writeHtpasswd, hashUserRows, validateSite, driftOf, httpConfDrift,
   parseManifest, selfSiteErrors, selfSiteWarnings, selfRevertErrors, docrootRemovalRefusal,
+  NESTED, htpasswdPath,
 } from './lib/manifest.js'
 import { b32decode, newSecret, otpauth, totpValid } from './lib/totp.js'
 
@@ -105,6 +106,16 @@ const SELF_RECOVERY = [
 
 mkdirs()
 
+// multer's temp files: an upload whose client vanished leaves its temp behind — multer cleans its
+// own errors, not a disappeared peer, and nothing reads this directory again. Anything older than
+// a day at boot is litter; a fresh one belongs to an upload that may be in flight.
+const UPLOADS = path.join(PATHS.stateDir, 'uploads')
+try {
+  for (const f of fs.readdirSync(UPLOADS)) {
+    if (Date.now() - fs.statSync(path.join(UPLOADS, f)).mtimeMs > 86_400_000) fs.rmSync(path.join(UPLOADS, f), { force: true })
+  }
+} catch { /* no uploads directory yet: nothing to sweep */ }
+
 const app = express()
 // Behind its own vhost every request arrives from nginx, so without this req.ip is 127.0.0.1 for
 // everybody — one shared throttle bucket, where one attacker's five wrong passwords lock out the
@@ -113,9 +124,25 @@ const app = express()
 app.set('trust proxy', 'loopback')
 app.use(express.json({ limit: '1mb' }))
 
+// Three headers the browser should be told on every response, including the static shell. nosniff
+// keeps anything here from being re-read as a different type; no-referrer keeps a URL that carries
+// a query (a ?path=… deep link) out of other sites' logs; DENY keeps the panel out of a frame.
+// No Content-Security-Policy yet — the theme boots from an inline script, so a policy would need
+// script-src 'unsafe-inline' and be weakened from its first day.
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff')
+  res.set('Referrer-Policy', 'no-referrer')
+  res.set('X-Frame-Options', 'DENY')
+  next()
+})
+
 // ---------- auth: random token, in-memory map, cookie ----------
 const sessions = new Map()
 const COOKIE = 'sid'
+
+// Sliding expiry only advances sessions that are used, so an abandoned one would sit for as long
+// as the process runs. One sweep an hour deletes what authed() would refuse anyway.
+setInterval(() => { for (const [t, s] of sessions) if (Date.now() > s.expires) sessions.delete(t) }, 3_600_000).unref()
 
 function parseCookies(req) {
   const out = {}
@@ -228,15 +255,30 @@ app.post('/api/logout', (req, res) => {
 
 app.use('/api', requireAuth)
 
+// One mutating request at a time. Every mutation is a read-modify-write cycle over the manifest —
+// read in the route, written inside its apply() — so two overlapping saves read the same manifest
+// and the second write erases the first's site from it while its conf stays behind on disk. GETs
+// pass through: they cannot tear a write, which runs to completion inside one event-loop turn.
+let writes = Promise.resolve()
+app.use('/api', (req, res, next) => {
+  if (req.method === 'GET') return next()
+  writes = writes.then(
+    () => new Promise(done => { res.on('finish', done); res.on('close', done); next() }),
+    () => {},
+  )
+})
+
 // DRY mode: write files but skip nginx -t / reload
 // Every write first gives the dashboard's own vhost a chance to put itself back; see selfRepair.
 const apply = async (...a) => {
   await selfRepair()
   return DRY ? safeApplyDry(...a) : safeApply(...a)
 }
-function safeApplyDry(files, mutate) {
+async function safeApplyDry(files, mutate) {
   try {
-    mutate()
+    // Same await as safeApply: the callers hash passwords inside the transaction, and a not-awaited
+    // mutate would report success before the write landed.
+    await mutate()
     return { ok: true, output: 'dry mode: written without nginx -t' }
   } catch (e) { return { ok: false, output: e.message } }
 }
@@ -466,8 +508,13 @@ function sanitizeSite(input, base) {
   // write it into real's conf. The URL param names the file; the body never renames it.
   const name = base ? base.name : String(input?.name || '')
   const d = defaultSite(name)
-  const s = { ...base, ...input, name }
-  for (const k of ['https', 'hsts', 'listen', 'php', 'rateLimit', 'ipRules', 'basicAuth', 'gzip', 'staticCache']) {
+  // Unknown keys are dropped, not stored: overlayErrors refuses a key that is not a site field,
+  // and a save draws the same line — anything else rides into the manifest for ever, unread by
+  // anything and uncleanable by any save. `base` is left as it is: already-stored keys are the
+  // manifest's, and rewriting history here would rewrite sites nobody is editing.
+  const known = Object.fromEntries(Object.entries(input || {}).filter(([k]) => k in d))
+  const s = { ...base, ...known, name }
+  for (const k of NESTED) {
     s[k] = { ...(base?.[k] || d[k]), ...(input?.[k] || {}) }
   }
   s.proxy = Array.isArray(input?.proxy) ? input.proxy : (base?.proxy || [])
@@ -496,10 +543,6 @@ function writeSiteFiles(site, m) {
   fs.writeFileSync(HTTP_CONF, renderHttpConf(m.sites))
 }
 
-// Deep-merged one level, the same shape sanitizeSite builds, so an override like
-// {"gzip":{"enabled":false}} cannot drop the types that live beside it.
-const NESTED_KEYS = ['https', 'hsts', 'listen', 'php', 'rateLimit', 'ipRules', 'basicAuth', 'gzip', 'staticCache']
-
 /**
  * The site factory with the operator's own preferences laid over it. Applied **only when a site is
  * created**: `normalizeSite` keeps filling gaps from `defaultSite`, so changing a preference here
@@ -510,7 +553,7 @@ const NESTED_KEYS = ['https', 'hsts', 'listen', 'php', 'rateLimit', 'ipRules', '
 function createDefaults(name, o = readSettings().newSiteDefaults || {}) {
   const d = defaultSite(name)
   const s = { ...d, ...o, name }
-  for (const k of NESTED_KEYS) s[k] = { ...d[k], ...(o[k] || {}) }
+  for (const k of NESTED) s[k] = { ...d[k], ...(o[k] || {}) }
   return s
 }
 
@@ -544,7 +587,9 @@ function overlayErrors(o) {
 
 // MANIFEST belongs in the transaction: it is written inside mutate(), so leaving it out of
 // `files` means a failed nginx -t rolls the conf back while the manifest keeps the change.
-const siteFiles = name => [siteConfPath(name), HTTP_CONF, MANIFEST]
+// The htpasswd file belongs here for the same reason: a save that fails must put the password
+// file back with the manifest and the conf, and a delete must take it away with them.
+const siteFiles = name => [siteConfPath(name), HTTP_CONF, MANIFEST, htpasswdPath(name)]
 
 // Advisory, and only for the dashboard's own vhost — a save that would work but leave it more
 // exposed than it needs to be still goes through, and the response carries the reason to reconsider.
@@ -629,11 +674,16 @@ app.post('/api/sites', async (req, res) => {
   if (errs.length) return res.status(400).json({ error: errs.join('; ') + (isSelf(name) ? `\n\n${SELF_RECOVERY}` : '') })
 
   m.sites.push(site)
-  // Back onto the object *before* the manifest is written: the returned rows are the hashed ones,
-  // and `site` is what writeSiteFiles stores. Left unassigned, the plaintext the form sent would be
+  // The password write happens *inside* the transaction, after safeApply has backed the previous
+  // file up: a failed nginx -t or reload then restores the old password file along with the
+  // manifest, instead of leaving a new password live on a site the save just refused. Back onto
+  // the object *before* the manifest is written: the returned rows are the hashed ones, and
+  // `site` is what writeSiteFiles stores. Left unassigned, the plaintext the form sent would be
   // what lands in the manifest — the hashing would look like it worked and change nothing.
-  site.basicAuth = { ...site.basicAuth, users: await writeHtpasswd(site) }
-  const result = await apply(siteFiles(name), () => writeSiteFiles(site, m), { label: `create site ${name}`, testLink: testLinkFor(name) })
+  const result = await apply(siteFiles(name), async () => {
+    site.basicAuth = { ...site.basicAuth, users: await writeHtpasswd(site) }
+    writeSiteFiles(site, m)
+  }, { label: `create site ${name}`, testLink: testLinkFor(name) })
   if (!result.ok) return res.status(422).json({ error: result.output })
 
   // docroot + placeholder so the site serves something immediately. Created only once the conf
@@ -659,9 +709,13 @@ app.put('/api/sites/:name', async (req, res) => {
   if (isSelf(name)) errs.push(...selfSiteErrors(site, { host: HOST, port: PORT, enabled: linkExists(name) }))
   if (errs.length) return res.status(400).json({ error: errs.join('; ') + (isSelf(name) ? `\n\n${SELF_RECOVERY}` : '') })
 
-  site.basicAuth = { ...site.basicAuth, users: await writeHtpasswd(site) }
+  // Inside the transaction, for the same reason as the create route: a refused save must not
+  // leave the new password on disk.
   m.sites = m.sites.map(s => (s.name === name ? site : s))
-  const result = await apply(siteFiles(name), () => writeSiteFiles(site, m), { label: `update site ${name}`, testLink: testLinkFor(name) })
+  const result = await apply(siteFiles(name), async () => {
+    site.basicAuth = { ...site.basicAuth, users: await writeHtpasswd(site) }
+    writeSiteFiles(site, m)
+  }, { label: `update site ${name}`, testLink: testLinkFor(name) })
   if (!result.ok) return res.status(422).json({ error: result.output })
   res.json({ ok: true, site, ...warningPayload(site) })
 })
@@ -711,6 +765,10 @@ app.delete('/api/sites/:name', async (req, res) => {
     writeManifest(m)
     fs.rmSync(siteConfPath(name), { force: true })
     fs.rmSync(enabledConfPath(name), { force: true })
+    // The site's password file goes with it — hashes for a site that no longer exists are
+    // litter, and turning basic auth back on (which is why a disable leaves it) needs the site.
+    // It is in `files`, so a failed delete restores it instead of leaving it gone.
+    fs.rmSync(htpasswdPath(name), { force: true })
     fs.writeFileSync(HTTP_CONF, renderHttpConf(m.sites))
   }, { label: `delete site ${name}` })
   if (!result.ok) return res.status(422).json({ error: result.output })
@@ -1210,7 +1268,10 @@ server {
 if (!fs.existsSync(STATUS_CONF)) {
   // awaited so the server is not listening before stub_status is live — otherwise a first
   // /api/metrics call races the nginx -t + reload this triggers and 503s
-  await apply([STATUS_CONF], () => fs.writeFileSync(STATUS_CONF, STATUS_CONF_TEXT), { label: 'enable metrics (stub_status)' })
+  const stub = await apply([STATUS_CONF], () => fs.writeFileSync(STATUS_CONF, STATUS_CONF_TEXT), { label: 'enable metrics (stub_status)' })
+  // Not silent: on a box where this write is refused (a conf.d the dashboard cannot write, say),
+  // the only symptom was /api/metrics answering 503 for ever with no hint of why.
+  if (!stub.ok) console.error(`could not write ${STATUS_CONF}: ${stub.output}`)
 }
 
 app.get('/api/metrics', async (req, res) => {

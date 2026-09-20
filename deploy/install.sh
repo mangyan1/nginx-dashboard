@@ -98,7 +98,12 @@ fi
 # ---------- 2. app files + node deps ----------
 say "installing app to $APP_DIR…"
 mkdir -p "$APP_DIR"
-rsync -a --delete --exclude node_modules "$SRC_DIR"/ "$APP_DIR"/
+# The excludes are the tree a server does not need and would otherwise receive: the git history,
+# the test suites, and the branding kit with its zip — none of which the dashboard or its unit
+# file reads. The .conf-era leftovers of a previous rsync are removed by --delete, as always.
+rsync -a --delete --exclude node_modules --exclude .git --exclude test \
+  --exclude NXD-Branding-icons --exclude NXD-Branding-icons.zip \
+  "$SRC_DIR"/ "$APP_DIR"/
 if [ ! -d "$APP_DIR/dist" ]; then
   echo "ERROR: dist/ is missing — run 'npm run build' on your dev machine and re-copy." >&2
   exit 1
