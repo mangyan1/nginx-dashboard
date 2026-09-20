@@ -35,6 +35,7 @@ bash "$SRC/deploy/install.sh"
 [ -d "$APP/dist" ] || fail "installer left no $APP/dist — the page would 404"
 [ -f "$APP/node_modules/express/package.json" ] || fail "npm install --omit=dev left no express"
 [ -f "$UNIT" ] || fail "no systemd unit at $UNIT"
+[ -f /etc/systemd/system/nginx-dashboard-backup.timer ] || fail "no backup timer installed"
 
 # node >= the floor the installer itself declares, whether node was already here or came from
 # NodeSource. Read out of install.sh rather than written here: a second copy of the number is a
@@ -53,6 +54,10 @@ case "$PW" in
   change-me|changeme|demo|password|admin) fail "unit still carries the placeholder password" ;;
 esac
 say "unit carries a generated password (not the shipped placeholder)"
+
+# The unit is world-readable by default and carries that same password, so an installer that
+# leaves it at systemd's 0644 hands the credential to every local user.
+[ "$(stat -c '%a' "$UNIT")" = 600 ] || fail "the unit is $(stat -c '%a' "$UNIT"), not 600 — the password is world-readable"
 
 # ---------- 2. re-run, which the README calls idempotent ----------
 say "install.sh again — a re-run must not reset the password it already generated"
@@ -94,5 +99,14 @@ CODE=$(curl -s -o /tmp/sites.json -w '%{http_code}' -b /tmp/cookies "http://127.
 [ "$CODE" = 200 ] || fail "/api/sites: $CODE $(cat /tmp/sites.json)"
 grep -q '"sites"' /tmp/sites.json || fail "/api/sites answered without a sites list"
 say "served $(grep -o '"name"' /tmp/sites.json | wc -l) site row(s) off $APP"
+
+# ---------- 5. the snapshot the timer will run ----------
+# State dir, nginx conf, tarball, rotation: one run of the script the timer executes daily.
+say "backup.sh"
+bash "$SRC/deploy/backup.sh"
+[ -n "$(find /var/backups/nginx-dashboard -name 'nxd-*.tar.gz' -print -quit)" ] ||
+  fail "backup.sh produced no snapshot"
+[ "$(stat -c '%a' "$(find /var/backups/nginx-dashboard -name 'nxd-*.tar.gz' -print -quit)")" = 600 ] ||
+  fail "the snapshot is not 0600 — it holds certificates and password hashes"
 
 say "ok — installer and app both work on this distribution"

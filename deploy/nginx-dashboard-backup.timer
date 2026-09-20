@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly snapshot of the NGINX dashboard's state and config
+
+[Timer]
+OnCalendar=daily
+# A server that was off at the scheduled time gets its snapshot on the next boot —
+# a missed backup is precisely the one you wanted.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

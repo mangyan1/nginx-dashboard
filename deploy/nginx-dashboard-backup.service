@@ -1,0 +1,6 @@
+[Unit]
+Description=NGINX Dashboard — snapshot its state and generated config
+
+[Service]
+Type=oneshot
+ExecStart=/opt/nginx-dashboard/deploy/backup.sh

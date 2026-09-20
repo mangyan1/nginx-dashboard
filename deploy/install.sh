@@ -141,8 +141,19 @@ else
     say "kept existing DASH_TOTP_SECRET"
   fi
 fi
+# ---------- 3b. nightly backup timer ----------
+say "installing nightly backup timer…"
+cp "$SRC_DIR/deploy/nginx-dashboard-backup.service" /etc/systemd/system/
+cp "$SRC_DIR/deploy/nginx-dashboard-backup.timer" /etc/systemd/system/
+systemctl enable --now nginx-dashboard-backup.timer
+
+# The unit carries DASH_PASSWORD, and systemd's default unit mode is world-readable — every
+# local user could read a root-equivalent credential off it. Everything else holding a secret
+# here is already 0600 (settings.json) or 0640 (htpasswd); the unit is the odd one out.
+chmod 600 /etc/systemd/system/nginx-dashboard.service
 systemctl daemon-reload
 systemctl enable --now nginx-dashboard
 
 say "done. dashboard listens on 127.0.0.1:7412 — reach it with: ssh -L 7412:localhost:7412 <server>"
+say "a nightly snapshot of its state and nginx's config lands in /var/backups/nginx-dashboard"
 say "to reach it from another machine on the LAN, open the dashboard and use Control → 'Reaching this dashboard' → Publish: it writes a vhost bound to one LAN address and allowlisted to private ranges, then enable it under Sites."

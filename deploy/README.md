@@ -74,6 +74,19 @@ The installer generates a random `DASH_PASSWORD` and prints it once.
 It's stored in `/etc/systemd/system/nginx-dashboard.service` — change it there,
 then `systemctl restart nginx-dashboard`.
 
+## Backups
+
+A nightly timer (`nginx-dashboard-backup.timer`, installed by the same installer)
+tars nginx's config and the dashboard's state directory — the manifest, settings,
+htpasswd files, undo history — into `/var/backups/nginx-dashboard/`, keeps the
+newest 14 days, and catches up after downtime (`Persistent`). The undo history is
+a way back one click, not a backup; this is the backup, and it is 0600 because it
+holds certificates and password hashes. Restore, as root:
+
+```bash
+tar -xzf /var/backups/nginx-dashboard/nxd-<stamp>.tar.gz -C /
+```
+
 ## Keeping nginx patched
 
 nginx comes from the distribution, not from this repository and not from
