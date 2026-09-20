@@ -127,12 +127,28 @@ app.use(express.json({ limit: '1mb' }))
 // Three headers the browser should be told on every response, including the static shell. nosniff
 // keeps anything here from being re-read as a different type; no-referrer keeps a URL that carries
 // a query (a ?path=… deep link) out of other sites' logs; DENY keeps the panel out of a frame.
-// No Content-Security-Policy yet — the theme boots from an inline script, so a policy would need
-// script-src 'unsafe-inline' and be weakened from its first day.
+//
+// And a Content-Security-Policy, possible since the fonts moved in and the theme bootstrap moved
+// out to public/theme.js: everything is same-origin, so the policy is 'self' everywhere. React
+// and chart.js size elements through CSSOM, which a style-src of 'self' does not touch — the
+// attribute path (setAttribute('style', …)) is what it would block, and nothing here uses it.
+// frame-ancestors is the modern twin of X-Frame-Options, kept for older browsers.
 app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff')
   res.set('Referrer-Policy', 'no-referrer')
   res.set('X-Frame-Options', 'DENY')
+  res.set('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src 'self'",
+    "connect-src 'self'",
+    "font-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; '))
   next()
 })
 

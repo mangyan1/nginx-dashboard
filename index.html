@@ -7,16 +7,8 @@
     <title>NXD — NGINX dashboard</title>
     <meta name="description" content="Observe, configure and deploy NGINX from a browser." />
 
-    <!-- The theme has to be on <html> before the first paint, or a light-mode reload flashes
-         the dark background for a frame. Dark is the brand's native surface, so it wins unless
-         the user has deliberately picked light — the OS preference is not consulted. -->
-    <script>
-      try {
-        document.documentElement.dataset.theme = localStorage.getItem('nxd-theme') || 'dark'
-      } catch (e) {
-        document.documentElement.dataset.theme = 'dark'
-      }
-    </script>
+    <!-- The theme, set before the first paint (see public/theme.js for why it is external). -->
+    <script src="/theme.js"></script>
 
     <!-- Both faces are self-hosted from /fonts — see the @font-face block at the top of
          src/style.css. Nothing here reaches a public CDN. -->
