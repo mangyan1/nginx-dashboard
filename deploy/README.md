@@ -11,7 +11,7 @@ Then copy the whole folder (including `dist/`) to the server and run the install
 
 ```bash
 scp -r . user@server:/tmp/nginx-dashboard
-ssh user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh'
+ssh -t user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh'
 ```
 
 `install.sh` is idempotent — re-running it upgrades outdated dependencies
@@ -45,7 +45,7 @@ The dashboard serves static sites out of the box. To run PHP sites — WordPress
 included — install the rest of the stack:
 
 ```bash
-ssh user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh --lemp'
+ssh -t user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh --lemp'
 ```
 
 That is the same installer plus `deploy/lemp.sh`, which installs MariaDB (or

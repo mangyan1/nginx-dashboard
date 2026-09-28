@@ -25,6 +25,8 @@ rejects never reaches it — and every successful change is undoable.
 ## Try it
 
 ```bash
+git clone https://github.com/mangyan1/nginx-dashboard.git
+cd nginx-dashboard
 npm install
 npm run demo
 ```
@@ -34,12 +36,18 @@ Opens on http://127.0.0.1:7412, password `demo`.
 
 ## Install on a server
 
+All four lines run on **your own computer**, from inside the project folder.
+Replace `user@server` with your SSH login — e.g. `root@203.0.113.5`.
+
 ```bash
-npm install
-npm run build                       # produces dist/
-scp -r . user@server:/tmp/nginx-dashboard
-ssh user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh'
+npm install                                 # fetch the project's dependencies
+npm run build                               # build the frontend into dist/ — the installer needs it
+scp -r . user@server:/tmp/nginx-dashboard   # copy the whole project to the server
+ssh -t user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh'
 ```
+
+The last line connects to the server and runs the installer there; `-t` lets
+sudo ask you for your password.
 
 It installs a systemd unit, generates a `DASH_PASSWORD` (printed once), and binds
 to `127.0.0.1:7412` — reach it over an SSH tunnel or publish its own vhost from
