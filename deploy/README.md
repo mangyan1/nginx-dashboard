@@ -21,6 +21,11 @@ outdated if they are: upgrading them on a server would make the installed tree
 differ from the one CI tested, so the lockfile decides and `npm outdated` says what
 is waiting.
 
+`install.sh --lan` opts into LAN reachability: the app binds `0.0.0.0` and, with
+ufw active, the installer opens 7412 to the box's private subnet —
+`http://<LAN-IP>:7412` from any machine on the network. A re-run keeps the
+setting, like it keeps the password.
+
 CI installs the whole thing onto a fresh Debian 12 and 13, Ubuntu 22.04, 24.04 and 26.04
 (`test/install-container.sh`): it runs the installer twice, boots what it installed, logs in
 with the password the installer generated and calls an authenticated endpoint. That is what
@@ -135,7 +140,7 @@ shipped unit file.
 |---|---|---|
 | `DASH_PASSWORD` | — | the login password; required, and refused if it is the unit's own `change-me` or another published placeholder |
 | `DASH_DEMO` | unset | `1` allows a placeholder password and nothing else. `npm run demo` sets it; never set it here |
-| `DASH_HOST` / `DASH_PORT` | `127.0.0.1` / `7412` | what the dashboard itself binds |
+| `DASH_HOST` / `DASH_PORT` | `127.0.0.1` / `7412` | what the dashboard itself binds; `install.sh --lan` rewrites `DASH_HOST` to `0.0.0.0` |
 | `DASH_SELF_NAME` | `nxd` | name of the dashboard's own managed vhost; unset pins nothing |
 | `DASH_MAX_UPLOAD_MB` | `2048` | upload cap for the file manager, and the default for the self vhost's `client_max_body_size` |
 | `DASH_TOTP_SECRET` | unset | base32 TOTP secret. Unset = the second factor is managed from Settings; set = required at login, and the Settings controls are disabled rather than ignored |

@@ -65,6 +65,14 @@ bash "$SRC/deploy/install.sh"
 [ "$(sed -n 's/^Environment=DASH_PASSWORD=//p' "$UNIT")" = "$PW" ] ||
   fail "the second run changed DASH_PASSWORD — every re-run would lock the operator out"
 
+# ---------- 2b. --lan: the bind flips, and secrets survive it ----------
+say "install.sh --lan — must flip the bind and keep the password"
+bash "$SRC/deploy/install.sh" --lan
+[ "$(sed -n 's/^Environment=DASH_HOST=//p' "$UNIT")" = "0.0.0.0" ] ||
+  fail "--lan left DASH_HOST at $(sed -n 's/^Environment=DASH_HOST=//p' "$UNIT")"
+[ "$(sed -n 's/^Environment=DASH_PASSWORD=//p' "$UNIT")" = "$PW" ] ||
+  fail "the --lan run changed DASH_PASSWORD — flipping the bind must not touch secrets"
+
 # ---------- 3. boot what it installed ----------
 # nginx first: the master has to exist or `nginx -s reload` has nothing to signal. It daemonises.
 nginx || fail "nginx would not start"

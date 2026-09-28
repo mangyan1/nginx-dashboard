@@ -4,6 +4,8 @@
 #
 #   install.sh          the dashboard and what it needs (nginx, certbot, unzip, node, curl, rsync)
 #   install.sh --lemp   the above, plus MariaDB and PHP-FPM — see deploy/lemp.sh
+#   install.sh --lan    also answer on the LAN: binds 0.0.0.0 and, when ufw is active, opens
+#                       7412 and the web ports 80/443 to the box's private subnet
 set -euo pipefail
 
 APP_DIR=/opt/nginx-dashboard
@@ -15,10 +17,12 @@ say() { echo -e "\033[1;34m[install]\033[0m $*"; }
 # The stack is opt-in. Without the flag this script behaves exactly as it always has, and re-running
 # it never touches the package set on a box whose operator chose their own database.
 WITH_LEMP=0
+WITH_LAN=0
 for arg in "$@"; do
   case "$arg" in
     --lemp) WITH_LEMP=1 ;;
-    -h|--help) echo "usage: install.sh [--lemp]   --lemp also installs MariaDB + PHP-FPM"; exit 0 ;;
+    --lan) WITH_LAN=1 ;;
+    -h|--help) echo "usage: install.sh [--lemp] [--lan]   --lemp: MariaDB + PHP-FPM; --lan: serve the dashboard to your LAN"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -127,6 +131,7 @@ else
   # published password on a dashboard that is root-equivalent. Read both before the copy.
   KEEP_TOTP=$(grep -h '^Environment=DASH_TOTP_SECRET=' /etc/systemd/system/nginx-dashboard.service || true)
   KEEP_PASSWORD=$(grep -h '^Environment=DASH_PASSWORD=' /etc/systemd/system/nginx-dashboard.service || true)
+  KEEP_HOST=$(grep -h '^Environment=DASH_HOST=' /etc/systemd/system/nginx-dashboard.service || true)
   cp "$SRC_DIR/deploy/nginx-dashboard.service" /etc/systemd/system/nginx-dashboard.service
   if [ -n "$KEEP_PASSWORD" ]; then
     sed -i "s|^Environment=DASH_PASSWORD=.*|$KEEP_PASSWORD|" /etc/systemd/system/nginx-dashboard.service
@@ -140,12 +145,42 @@ else
     sed -i "s|^#Environment=DASH_TOTP_SECRET=.*|$KEEP_TOTP|" /etc/systemd/system/nginx-dashboard.service
     say "kept existing DASH_TOTP_SECRET"
   fi
+  # A hand-set DASH_HOST (or one from a previous --lan) is the same class of operator choice as
+  # the password above: the template's 127.0.0.1 would silently take the dashboard off the
+  # network it was put on.
+  if [ -n "$KEEP_HOST" ]; then
+    sed -i "s|^Environment=DASH_HOST=.*|$KEEP_HOST|" /etc/systemd/system/nginx-dashboard.service
+    say "kept existing DASH_HOST"
+  fi
 fi
 # ---------- 3b. nightly backup timer ----------
 say "installing nightly backup timer…"
 cp "$SRC_DIR/deploy/nginx-dashboard-backup.service" /etc/systemd/system/
 cp "$SRC_DIR/deploy/nginx-dashboard-backup.timer" /etc/systemd/system/
 systemctl enable --now nginx-dashboard-backup.timer
+
+# ---------- 3c. LAN access (opt-in) ----------
+if [ "$WITH_LAN" = 1 ]; then
+  # 0.0.0.0 rather than the box's LAN address on purpose: loopback keeps answering, so the SSH
+  # tunnel and the app's own plumbing survive; the network side is the firewall's job. With ufw
+  # active the rule is opened here — without one the operator gets a warning, not a silent 0.0.0.0.
+  sed -i "s/^Environment=DASH_HOST=.*/Environment=DASH_HOST=0.0.0.0/" /etc/systemd/system/nginx-dashboard.service
+  systemctl restart nginx-dashboard 2>/dev/null || true   # a re-run needs this to pick up the bind
+  LAN_IP=$(hostname -I 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)/) {print $i; exit}}' || true)
+  if [ -z "$LAN_IP" ]; then
+    say "no private address on this box — bind is 0.0.0.0, so firewall it yourself"
+  elif command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    LAN_SUBNET=$(ip -4 route 2>/dev/null | awk -v ip="$LAN_IP" '$0 ~ "src " ip {print $1; exit}' || true)
+    if [ -n "$LAN_SUBNET" ]; then
+      ufw allow from "$LAN_SUBNET" to any port 7412,80,443 proto tcp
+      say "LAN access: http://$LAN_IP:7412 — allowed $LAN_SUBNET on 7412, 80 and 443"
+    else
+      say "could not work out the subnet of $LAN_IP — open port 7412 in your firewall yourself"
+    fi
+  else
+    say "no active ufw — enable it and allow 7412 from your subnet, or the dashboard answers on every network"
+  fi
+fi
 
 # The unit carries DASH_PASSWORD, and systemd's default unit mode is world-readable — every
 # local user could read a root-equivalent credential off it. Everything else holding a secret
@@ -154,6 +189,10 @@ chmod 600 /etc/systemd/system/nginx-dashboard.service
 systemctl daemon-reload
 systemctl enable --now nginx-dashboard
 
-say "done. dashboard listens on 127.0.0.1:7412 — reach it with: ssh -L 7412:localhost:7412 <server>"
+if [ "$WITH_LAN" = 1 ] && [ -n "${LAN_IP:-}" ]; then
+  say "done. open http://$LAN_IP:7412 from any machine on your LAN"
+else
+  say "done. dashboard listens on 127.0.0.1:7412 — reach it with: ssh -L 7412:localhost:7412 <server>"
+fi
 say "a nightly snapshot of its state and nginx's config lands in /var/backups/nginx-dashboard"
 say "to reach it from another machine on the LAN, open the dashboard and use Control → 'Reaching this dashboard' → Publish: it writes a vhost bound to one LAN address and allowlisted to private ranges, then enable it under Sites."

@@ -6,6 +6,7 @@ After=network.target nginx.service
 ExecStart=/usr/bin/node /opt/nginx-dashboard/server.js
 Environment=DASH_PASSWORD=change-me
 Environment=NODE_ENV=production
+# install.sh --lan rewrites this to 0.0.0.0 and opens ufw; the loopback default keeps the app private
 Environment=DASH_HOST=127.0.0.1
 Environment=DASH_PORT=7412
 # The vhost this dashboard manages for itself. Publishing it (Control → "Reaching this dashboard")
