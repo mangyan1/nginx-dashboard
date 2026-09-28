@@ -36,25 +36,28 @@ Opens on http://127.0.0.1:7412, password `demo`.
 
 ## Install on a server
 
-All four lines run on **your own computer**, from inside the project folder.
-Replace `user@server` with your SSH login — e.g. `root@203.0.113.5`.
+Log into the server, clone the repo, run the installer. The server needs `git`
+(`apt install git` first if it hasn't).
 
 ```bash
-npm install                                 # fetch the project's dependencies
-npm run build                               # build the frontend into dist/ — the installer needs it
-scp -r . user@server:/tmp/nginx-dashboard   # copy the whole project to the server
-ssh -t user@server 'sudo bash /tmp/nginx-dashboard/deploy/install.sh'
+ssh root@203.0.113.5        # log in — everything below runs on the server
+git clone https://github.com/mangyan1/nginx-dashboard.git
+cd nginx-dashboard
+sudo bash deploy/install.sh  # installs node, nginx and the app, prints the password
 ```
 
-The last line connects to the server and runs the installer there; `-t` lets
-sudo ask you for your password.
+The installer needs root — logged in as root with no `sudo` on the box, plain
+`bash deploy/install.sh` does the same.
 
-It installs a systemd unit, generates a `DASH_PASSWORD` (printed once), and binds
-to `127.0.0.1:7412` — reach it over an SSH tunnel or publish its own vhost from
-the Control tab. Optional `--lemp` adds MariaDB and PHP-FPM.
+No build step anywhere: the built frontend (`dist/`) ships with the repo, and
+the installer adds the rest — node, nginx, certbot, the app's npm packages. It
+copies the app to `/opt/nginx-dashboard`, installs a systemd unit, generates a
+`DASH_PASSWORD` (printed once), and binds to `127.0.0.1:7412` — reach it over
+an SSH tunnel or publish its own vhost from the Control tab. Optional `--lemp`
+adds MariaDB and PHP-FPM.
 
-**Full deployment guide — environment variables, LEMP stack, updates, lockout
-recovery:** [deploy/README.md](deploy/README.md)
+**Full deployment guide — building your own frontend, environment variables,
+LEMP stack, updates, lockout recovery:** [deploy/README.md](deploy/README.md)
 
 ## Security
 
