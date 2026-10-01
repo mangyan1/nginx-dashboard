@@ -165,17 +165,19 @@ if [ "$WITH_LAN" = 1 ]; then
   # tunnel and the app's own plumbing survive; the network side is the firewall's job. With ufw
   # active the rule is opened here — without one the operator gets a warning, not a silent 0.0.0.0.
   sed -i "s/^Environment=DASH_HOST=.*/Environment=DASH_HOST=0.0.0.0/" /etc/systemd/system/nginx-dashboard.service
-  systemctl restart nginx-dashboard 2>/dev/null || true   # a re-run needs this to pick up the bind
   LAN_IP=$(hostname -I 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)/) {print $i; exit}}' || true)
   if [ -z "$LAN_IP" ]; then
     say "no private address on this box — bind is 0.0.0.0, so firewall it yourself"
   elif command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-    LAN_SUBNET=$(ip -4 route 2>/dev/null | awk -v ip="$LAN_IP" '$0 ~ "src " ip {print $1; exit}' || true)
-    if [ -n "$LAN_SUBNET" ]; then
-      ufw allow from "$LAN_SUBNET" to any port 7412,80,443 proto tcp
+    # The default route can carry a "src" hint too, and handing ufw the word "default" as the
+    # source is the "Bad source address" abort — connected routes only, hence $1 != "default".
+    LAN_SUBNET=$(ip -4 route 2>/dev/null | awk -v ip="$LAN_IP" '$0 ~ "src " ip && $1 != "default" {print $1; exit}' || true)
+    if echo "$LAN_SUBNET" | grep -Eq '^[0-9]+(\.[0-9]+){3}/[0-9]+$'; then
+      ufw allow from "$LAN_SUBNET" to any port 7412,80,443 proto tcp ||
+        say "ufw refused the rule — open ports 7412, 80 and 443 to $LAN_SUBNET yourself"
       say "LAN access: http://$LAN_IP:7412 — allowed $LAN_SUBNET on 7412, 80 and 443"
     else
-      say "could not work out the subnet of $LAN_IP — open port 7412 in your firewall yourself"
+      say "could not work out the subnet of $LAN_IP — open ports 7412, 80 and 443 in your firewall yourself"
     fi
   else
     say "no active ufw — enable it and allow 7412 from your subnet, or the dashboard answers on every network"
@@ -188,6 +190,12 @@ fi
 chmod 600 /etc/systemd/system/nginx-dashboard.service
 systemctl daemon-reload
 systemctl enable --now nginx-dashboard
+# The bind flip above happens before this daemon-reload, so only a restart *here* hands the
+# running service its new environment; without it a --lan re-run writes 0.0.0.0 to disk and
+# keeps serving loopback.
+if [ "$WITH_LAN" = 1 ]; then
+  systemctl restart nginx-dashboard
+fi
 
 if [ "$WITH_LAN" = 1 ] && [ -n "${LAN_IP:-}" ]; then
   say "done. open http://$LAN_IP:7412 from any machine on your LAN"

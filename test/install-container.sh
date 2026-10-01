@@ -73,6 +73,16 @@ bash "$SRC/deploy/install.sh" --lan
 [ "$(sed -n 's/^Environment=DASH_PASSWORD=//p' "$UNIT")" = "$PW" ] ||
   fail "the --lan run changed DASH_PASSWORD — flipping the bind must not touch secrets"
 
+# ---------- 2c. the --lan subnet picker, which no container can reach (no ufw here) ----------
+# A default route can carry a "src" hint just like the connected route; the picker in install.sh
+# must skip it, or ufw is told "allow from default" and dies with "Bad source address".
+SUB=$(printf '%s\n' \
+  'default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.10 metric 100' \
+  '192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.10 metric 100' |
+  awk -v ip="192.168.1.10" '$0 ~ "src " ip && $1 != "default" {print $1; exit}')
+[ "$SUB" = "192.168.1.0/24" ] ||
+  fail "subnet picker returned '$SUB' — a default route would reach ufw as 'Bad source address'"
+
 # ---------- 3. boot what it installed ----------
 # nginx first: the master has to exist or `nginx -s reload` has nothing to signal. It daemonises.
 nginx || fail "nginx would not start"
